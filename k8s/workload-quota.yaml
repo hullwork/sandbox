@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sandbox-workload-quota
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+#🔴 The division of labor between the two gates is different, don’t treat them as the same thing:
+#requests.memory ≤ node allocable budget ← True gate to prevent OOM (scheduler only looks at requests)
+#SANDBOX_MAX_RUNTIMES × Single Pod valid limit ≤ limits.memory ← Prevent "K8s from rushing in"
+#Control Plane previously rejected", the user can get 429
+#The "valid value for a single Pod" is max(initContainer, Σcontainers), not Σcontainers——
+#This is how K8s is calculated, and the latter calculation would be an underestimate.
+# Render and admission tests must keep these limits aligned with the Runtime Pod
+# resources and the documented development-node budget.
+#
+#The development node budget assumes 2 cores and 2 GiB. The reference profile is
+#not configured with kube-reserved / system-reserved, so allocatable is approximately
+#capacity minus kubelet's default evictionHard(memory.available<100Mi); the node is still running
+#Cilium agent, kube-proxy, and CoreDNS that do not belong to this namespace but use the same memory.
+#Taking 60% of the node memory as the budget for this namespace is a conservative value that allows for sufficient expenses.
+#⚠️ This is an estimate, not an actual measurement: you should use `kubectl describe node` to check after installing it.
+#Allocatable and DaemonSet are actually occupied, come back and adjust here.
+#⚠️ After adding the runtime node, it needs to be enlarged - it is the total amount at the namespace level and does not depend on the number of nodes.
+#Automatically grow.
+spec:
+  hard:
+ # 4 Runtime + volume role double copies + init/gc Job, leaving a margin
+    pods: "14"
+    services: "12"
+ # 2 Core node: Scheduling is calculated based on request. This line is the true upper bound. Effective cpu for a single runtime
+ # The request is only 35m, and 4 additional volumes are far from enough. 2 cores are left as a margin for the job.
+    requests.cpu: "2"
+ # 63.5% of 2GiB. 4 × 144Mi (single Runtime Pod: init 16Mi + shell-mcp 128Mi)
+ # + 2 × 128Mi(volume) = 832Mi, the remaining space is left for init/gc Job and rolling update; when fully loaded
+ # Job can be pending. This calculation is based on the current single Runtime MCP container, and File Service is no longer included.
+    requests.memory: 1300Mi
+ # CPU is compressible, oversold just slows down: 4 × 700m + volume 500m + gc 200m ≈ 3.5 cores
+ # vs node 2 cores, leaving 4 for burst compilation/packaging.
+    limits.cpu: "4"
+ # Memory is not compressible. 4 × 768Mi + 256Mi(volume) = 3328Mi. This line can be **higher than** the node
+ # The allocation amount is intentional: it is stuck on the "sum of declared values" to prevent conflicts between Control Plane and K8s;
+ # What really prevents OOM is requests.memory above. init/gc Job is pending when full load,
+ # That's right - they can wait.
+    limits.memory: 3328Mi

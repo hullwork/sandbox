@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# JavaScript
+node_modules/
+console/dist/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.kubeconfig
+kubeconfig
+.sandbox/
+bench-results/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Local planning and test output
+.planning/
+*.log

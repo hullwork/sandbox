@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sandbox-workspaces
+  namespace: sandbox-workloads
+spec:
+  storageClassName: local-path

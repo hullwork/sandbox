@@ -1,0 +1,159 @@
+# Volume agent performs offline workspace operations against the shared claim.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-volume
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/name: sandbox-volume
+    app.kubernetes.io/managed-by: sandbox-controller
+spec:
+ # Two replicas + RollingUpdate: old and new Pods can mount the RWX volume at the same time, so offline reads
+ # of workspaces whose Runtime is not up keep flowing during a rollout, and one replica survives a single-node
+ # failure. 🔴 The RWO-era constraints (single replica, Recreate) were lifted together with the base moving to
+ # RWX - the rwo-single-node overlay patches this back to 1/Recreate.
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-volume
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-volume
+        app.kubernetes.io/managed-by: sandbox-controller
+    spec:
+ # Same shutdown choreography as the Control Plane (two roles in the same image), so the grace period must follow it too.
+ # This role has no reaper: budget = 5 draining + 120 waiting in-flight = 125s; during a rollout
+ # remove/purge is a destructive deletion of the entire tree. Cutting in the middle will leave a half-deleted Workspace directory.
+ # And the GC criterion (last_used_at under .sandbox) may happen to be the half that is deleted first.
+ # ⚠️ Same as Control Plane: it’s the upper limit, not the time consumption. If there are no requests in progress, it will be returned in just over 5 seconds.
+      terminationGracePeriodSeconds: 150
+ # The base uses operator-provided RWX storage and can run on any eligible node.
+ # The local RWO overlay pins this deployment to the Runtime node.
+ # It does not touch the Kubernetes API. KubeClient will read the SA token when it is constructed, so
+ # The initialization is skipped by role in core.py - the token is not linked here to match that code.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: volume
+          image: sandbox-control-plane:0.7.0
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+                name: sandbox-observability
+                optional: true
+          env:
+            - name: SANDBOX_CONTROL_PLANE_ROLE
+              value: volume
+ # 🔴 Only give this token. **Do not give SIGNING_KEY** - it can be used for any Workspace
+ # Sign the scoped token, and this Pod runs in the namespace where the untrusted load is located.
+ # The ownership verification remains in the Control Plane, where it only answers "whether the caller is a Control Plane".
+            - name: VOLUME_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-volume-auth
+                  key: token
+            - name: SANDBOX_CONTROL_PLANE_WORKSPACE_ROOT
+              value: /workspaces
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 25m
+ # The same discipline as Runtime: request mentions 50% of the limit. it resides
+ # In sandbox-workloads, underreporting request will make the scheduler think that the node is still empty.
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+ # 10s: When the host changes pages, Python single-threaded HTTP failure to respond within 3s does not mean death.
+ # Restarting by accident will only amplify the pressure on the host (2026-08-20 Storm Form).
+            timeoutSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 10
+          volumeMounts:
+ # The entire volume, without subPath - it needs to be able to see all Workspaces to list them.
+ # Writability is required: creating directory structure, purging content, and GC deleting directories all happen here.
+ # The boundaries of writing are guaranteed by the code (only Workspace granular operation, no "writing to a certain file").
+            - name: workspaces
+              mountPath: /workspaces
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+ # The volume role and Runtime Pods share one operator-provided RWX claim.
+ # Runtime Pods mount only their workspace subPath.
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: sandbox-workspaces
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-volume
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/name: sandbox-volume
+spec:
+  selector:
+    app.kubernetes.io/name: sandbox-volume
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# sandbox-workloads is default-deny and Control Plane cannot enter it. This line only allows access to Control Planes.
+# And only put 8080 - Runtime and Workspace Pods cannot get this path.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-plane-to-volume-agent
+  namespace: sandbox-workloads
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-volume
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: sandbox-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-control-plane
+      ports:
+        - protocol: TCP
+          port: 8080

@@ -1,0 +1,15 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sandbox-workspace-init
+  namespace: sandbox-workloads
+spec:
+  template:
+    spec:
+      nodeSelector:
+        sandbox.convee.io/node-role: runtime
+      tolerations:
+        - key: sandbox.convee.io/node-role
+          operator: Equal
+          value: runtime
+          effect: NoSchedule

@@ -1,0 +1,17 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sandbox-workspace-gc
+  namespace: sandbox-workloads
+spec:
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          nodeSelector:
+            sandbox.convee.io/node-role: runtime
+          tolerations:
+            - key: sandbox.convee.io/node-role
+              operator: Equal
+              value: runtime
+              effect: NoSchedule

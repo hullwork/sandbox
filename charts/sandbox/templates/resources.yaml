@@ -1,0 +1,910 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+  name: {{ .Values.namespaces.system }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+  name: {{ .Values.namespaces.workloads }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+  name: sandbox-workload-quota
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  hard:
+    limits.cpu: "4"
+    limits.memory: 3328Mi
+    pods: "14"
+    requests.cpu: "2"
+    requests.memory: 1300Mi
+    services: "12"
+---
+apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-ticket-leases
+  namespace: {{ .Values.namespaces.system }}
+rules:
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sandbox-lifecycle
+  namespace: {{ .Values.namespaces.workloads }}
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - persistentvolumeclaims
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - pods
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sandbox-monitoring
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+- apiGroups:
+  - metrics.k8s.io
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-ticket-leases
+  namespace: {{ .Values.namespaces.system }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-ticket-leases
+subjects:
+- kind: ServiceAccount
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.workloads }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sandbox-lifecycle
+subjects:
+- kind: ServiceAccount
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sandbox-monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: sandbox-monitoring
+subjects:
+- kind: ServiceAccount
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: v1
+data:
+  agent-bucket: {{ .Values.objectStore.agentBucket | quote }}
+  endpoint: {{ .Values.objectStore.endpoint | quote }}
+  health-path: {{ .Values.objectStore.healthPath | quote }}
+  upload-bucket: {{ .Values.objectStore.uploadBucket | quote }}
+  workspace-bucket: {{ .Values.objectStore.workspaceBucket | quote }}
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: object-store-config
+  name: object-store-config
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: v1
+data:
+  SANDBOX_IDLE_EVICT_SECONDS: {{ .Values.tuning.idleEvictSeconds | quote }}
+  SANDBOX_MAX_INFLIGHT_CREATES: {{ .Values.tuning.maxInflightCreates | quote }}
+  SANDBOX_MAX_RUNTIMES: {{ .Values.tuning.maxRuntimes | quote }}
+  SANDBOX_MAX_WORKSPACES: {{ .Values.tuning.maxWorkspaces | quote }}
+  SANDBOX_WORKSPACE_QUOTA: {{ .Values.tuning.workspaceQuota | quote }}
+kind: ConfigMap
+metadata:
+  name: sandbox-tuning
+  namespace: {{ .Values.namespaces.system }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-console
+  name: sandbox-console
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  ports:
+  - name: http
+    {{- if and (eq .Values.services.console.type "NodePort") .Values.services.console.nodePort }}
+    nodePort: {{ .Values.services.console.nodePort }}
+    {{- end }}
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: sandbox-console
+  type: {{ .Values.services.console.type }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-control-plane
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  ports:
+  - name: http
+    {{- if and (eq .Values.services.controlPlane.type "NodePort") .Values.services.controlPlane.nodePort }}
+    nodePort: {{ .Values.services.controlPlane.nodePort }}
+    {{- end }}
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: sandbox-control-plane
+  type: {{ .Values.services.controlPlane.type }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: sandbox-volume
+  name: sandbox-volume
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  ports:
+  - name: http
+    port: 8080
+    targetPort: http
+  selector:
+    app.kubernetes.io/name: sandbox-volume
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+  name: sandbox-workload-limits
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  limits:
+  - default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 25m
+      memory: 64Mi
+    max:
+      cpu: "1"
+      memory: 768Mi
+    type: Container
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-workspaces
+  name: sandbox-workspaces
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: {{ .Values.workspace.storageClass | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-console
+  name: sandbox-console
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-console
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: sandbox-controller
+        app.kubernetes.io/name: sandbox-console
+    spec:
+{{ include "sandbox.systemScheduling" . | nindent 6 }}
+      automountServiceAccountToken: false
+      containers:
+      - image: {{ include "sandbox.image" (list .Values.images.console) }}
+        imagePullPolicy: {{ .Values.images.console.pullPolicy }}
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 15
+          timeoutSeconds: 2
+        name: console
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        readinessProbe:
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+        resources:
+          limits:
+            cpu: 250m
+            memory: 128Mi
+          requests:
+            cpu: 25m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /livez
+            port: http
+          periodSeconds: 2
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 101
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 101
+        runAsNonRoot: true
+        runAsUser: 101
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - emptyDir:
+          sizeLimit: 64Mi
+        name: tmp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-control-plane
+  name: sandbox-control-plane
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-control-plane
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: sandbox-controller
+        app.kubernetes.io/name: sandbox-control-plane
+    spec:
+{{ include "sandbox.systemScheduling" . | nindent 6 }}
+      automountServiceAccountToken: true
+      containers:
+      - env:
+        - name: SANDBOX_CONTROL_PLANE_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: control-plane-token
+              name: sandbox-api-credentials
+        - name: SIGNING_KEY
+          valueFrom:
+            secretKeyRef:
+              key: signing-key
+              name: sandbox-api-credentials
+        - name: WORKSPACE_ID_KEY
+          valueFrom:
+            secretKeyRef:
+              key: workspace-id-key
+              name: sandbox-api-credentials
+        - name: SANDBOX_RUNTIME_IMAGE
+          value: {{ include "sandbox.image" (list .Values.images.runtime) | quote }}
+        - name: SANDBOX_RUNTIME_DRIVER
+          value: gvisor
+        - name: SANDBOX_RUNTIME_CLASS
+          value: gvisor
+        - name: SANDBOX_RUNTIME_NODE_SELECTOR
+{{- $runtimeSelectors := list }}
+{{- range $key, $value := .Values.runtime.nodeSelector }}
+{{- $runtimeSelectors = append $runtimeSelectors (printf "%s=%s" $key $value) }}
+{{- end }}
+          value: {{ join "," $runtimeSelectors | quote }}
+        - name: SANDBOX_RUNTIME_TOLERATIONS
+          value: {{ toJson .Values.runtime.tolerations | quote }}
+        - name: WORKSPACE_PVC
+          value: sandbox-workspaces
+        - name: SANDBOX_WORKSPACE_STORAGE_MODE
+          value: shared
+        - name: SANDBOX_TTL_SECONDS
+          value: "1800"
+        - name: WORKSPACE_IDLE_TTL_SECONDS
+          value: "21600"
+        - name: CHECKPOINT_RETENTION_SECONDS
+          value: "2592000"
+        - name: CHECKPOINT_GC_INTERVAL_SECONDS
+          value: "3600"
+        - name: ACCESS_TOKEN_TTL_SECONDS
+          value: "900"
+        - name: OBJECT_TICKET_TTL_SECONDS
+          value: "900"
+        - name: MAX_STREAM_OBJECT_BYTES
+          value: "67108864"
+        - name: OBJECT_STORE_ENDPOINT
+          valueFrom:
+            configMapKeyRef:
+              key: endpoint
+              name: object-store-config
+        - name: OBJECT_STORE_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              key: access-key
+              name: object-store-credentials
+        - name: OBJECT_STORE_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              key: secret-key
+              name: object-store-credentials
+        - name: OBJECT_STORE_UPLOAD_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              key: upload-bucket
+              name: object-store-config
+        - name: OBJECT_STORE_AGENT_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              key: agent-bucket
+              name: object-store-config
+        - name: OBJECT_STORE_WORKSPACE_BUCKET
+          valueFrom:
+            configMapKeyRef:
+              key: workspace-bucket
+              name: object-store-config
+        - name: OBJECT_STORE_HEALTH_PATH
+          valueFrom:
+            configMapKeyRef:
+              key: health-path
+              name: object-store-config
+        - name: SANDBOX_STORE_BACKEND
+          value: postgresql
+        - name: SANDBOX_DB_HOST
+          value: sandbox-postgres
+        - name: SANDBOX_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              key: database
+              name: {{ .Values.postgresql.authSecret }}
+        - name: SANDBOX_DB_USER
+          valueFrom:
+            secretKeyRef:
+              key: username
+              name: {{ .Values.postgresql.authSecret }}
+        - name: SANDBOX_DB_PASSWORD_FILE
+          value: /var/run/sandbox-db/password
+        - name: VOLUME_AGENT_URL
+          value: http://sandbox-volume.{{ .Values.namespaces.workloads }}.svc.cluster.local:8080
+        - name: VOLUME_AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: sandbox-volume-auth
+        - name: SANDBOX_MAX_CONCURRENT_MC
+          value: "1"
+        - name: SANDBOX_MC_GOMAXPROCS
+          value: "2"
+        - name: SANDBOX_MC_GOMEMLIMIT
+          value: 256MiB
+{{- if .Values.observability.tracing.endpoint }}
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: {{ .Values.observability.tracing.endpoint | quote }}
+        - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+          value: http/json
+        - name: OTEL_SERVICE_NAME
+          value: {{ .Values.observability.tracing.serviceName | quote }}
+{{- end }}
+        envFrom:
+        - configMapRef:
+            name: sandbox-tuning
+        image: {{ include "sandbox.image" (list .Values.images.controlPlane) }}
+        imagePullPolicy: {{ .Values.images.controlPlane.pullPolicy }}
+        livenessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /livez
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 2
+        name: control-plane
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /readyz
+            port: http
+          initialDelaySeconds: 2
+          periodSeconds: 2
+          timeoutSeconds: 5
+        resources:
+          limits:
+            cpu: 250m
+            memory: 1Gi
+          requests:
+            cpu: 50m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /tmp
+          name: tmp
+        - mountPath: /var/run/sandbox-db
+          name: db-password
+          readOnly: true
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: sandbox-control-plane
+      terminationGracePeriodSeconds: 210
+      volumes:
+      - emptyDir:
+          sizeLimit: 96Mi
+        name: tmp
+      - name: db-password
+        secret:
+          defaultMode: 288
+          items:
+          - key: password
+            path: password
+          secretName: {{ .Values.postgresql.authSecret }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-volume
+  name: sandbox-volume
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-volume
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: sandbox-controller
+        app.kubernetes.io/name: sandbox-volume
+    spec:
+{{ include "sandbox.systemScheduling" . | nindent 6 }}
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: SANDBOX_CONTROL_PLANE_ROLE
+          value: volume
+        - name: VOLUME_AGENT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: sandbox-volume-auth
+        - name: SANDBOX_CONTROL_PLANE_WORKSPACE_ROOT
+          value: /workspaces
+{{- if .Values.observability.tracing.endpoint }}
+        - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          value: {{ .Values.observability.tracing.endpoint | quote }}
+        - name: OTEL_EXPORTER_OTLP_TRACES_PROTOCOL
+          value: http/json
+        - name: OTEL_SERVICE_NAME
+          value: sandbox-volume
+{{- end }}
+        image: {{ include "sandbox.image" (list .Values.images.controlPlane) }}
+        imagePullPolicy: {{ .Values.images.controlPlane.pullPolicy }}
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          initialDelaySeconds: 20
+          periodSeconds: 15
+          timeoutSeconds: 10
+        name: volume
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 10
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 25m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /workspaces
+          name: workspaces
+        - mountPath: /tmp
+          name: tmp
+      enableServiceLinks: false
+      securityContext:
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 150
+      volumes:
+      - name: workspaces
+        persistentVolumeClaim:
+          claimName: sandbox-workspaces
+      - emptyDir:
+          sizeLimit: 32Mi
+        name: tmp
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-workspace-gc
+  name: sandbox-workspace-gc
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 900
+      backoffLimit: 1
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/managed-by: sandbox-controller
+            app.kubernetes.io/name: sandbox-workspace-gc
+        spec:
+{{ include "sandbox.systemScheduling" . | nindent 10 }}
+          automountServiceAccountToken: false
+          containers:
+          - command:
+            - python3
+            - /app/gc_workspaces.py
+            env:
+            - name: WORKSPACE_GC_ROOT
+              value: /workspaces
+            - name: WORKSPACE_DATA_TTL_SECONDS
+              value: "2592000"
+            - name: WORKSPACE_GC_DRY_RUN
+              value: "false"
+            image: {{ include "sandbox.image" (list .Values.images.fileService) }}
+            imagePullPolicy: {{ .Values.images.fileService.pullPolicy }}
+            name: workspace-gc
+            resources:
+              limits:
+                cpu: 200m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 24Mi
+            securityContext:
+              allowPrivilegeEscalation: false
+              capabilities:
+                drop:
+                - ALL
+              readOnlyRootFilesystem: true
+            volumeMounts:
+            - mountPath: /workspaces
+              name: workspaces
+            - mountPath: /tmp
+              name: tmp
+          enableServiceLinks: false
+          restartPolicy: Never
+          securityContext:
+            fsGroup: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            runAsUser: 65532
+            seccompProfile:
+              type: RuntimeDefault
+          volumes:
+          - name: workspaces
+            persistentVolumeClaim:
+              claimName: sandbox-workspaces
+          - emptyDir:
+              sizeLimit: 32Mi
+            name: tmp
+  schedule: 17 * * * *
+  startingDeadlineSeconds: 900
+  successfulJobsHistoryLimit: 1
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+    app.kubernetes.io/name: sandbox-workspace-init
+  name: sandbox-workspace-init
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: sandbox-controller
+        app.kubernetes.io/name: sandbox-workspace-init
+    spec:
+{{ include "sandbox.systemScheduling" . | nindent 6 }}
+      automountServiceAccountToken: false
+      containers:
+      - command:
+        - python3
+        - -c
+        - |
+          from pathlib import Path
+          root = Path("/workspaces")
+          root.mkdir(parents=True, exist_ok=True)
+          probe = root / ".workspace-volume-ready"
+          probe.write_text("ready\n", encoding="utf-8")
+        image: {{ include "sandbox.image" (list .Values.images.fileService) }}
+        imagePullPolicy: {{ .Values.images.fileService.pullPolicy }}
+        name: init
+        resources:
+          limits:
+            cpu: 100m
+            memory: 48Mi
+          requests:
+            cpu: 5m
+            memory: 16Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /workspaces
+          name: workspaces
+        - mountPath: /tmp
+          name: tmp
+      enableServiceLinks: false
+      restartPolicy: OnFailure
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      volumes:
+      - name: workspaces
+        persistentVolumeClaim:
+          claimName: sandbox-workspaces
+      - emptyDir:
+          sizeLimit: 8Mi
+        name: tmp
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-plane-to-sandbox-services
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.namespaces.system }}
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-control-plane
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values:
+      - sandbox-runtime
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-control-plane-to-volume-agent
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Values.namespaces.system }}
+      podSelector:
+        matchLabels:
+          app.kubernetes.io/name: sandbox-control-plane
+    ports:
+    - port: 8080
+      protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-volume
+  policyTypes:
+  - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-default-deny
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-public-egress
+  namespace: {{ .Values.namespaces.workloads }}
+spec:
+  egress:
+  - ports:
+    - port: 53
+      protocol: UDP
+    - port: 53
+      protocol: TCP
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+      podSelector:
+        matchLabels:
+          k8s-app: kube-dns
+  - ports:
+    - port: 80
+      protocol: TCP
+    - port: 443
+      protocol: TCP
+    to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except:
+        - 10.0.0.0/8
+        - 172.16.0.0/12
+        - 192.168.0.0/16
+        - 169.254.0.0/16
+        - 127.0.0.0/8
+  podSelector: {}
+  policyTypes:
+  - Egress
+---
+apiVersion: node.k8s.io/v1
+handler: runsc
+kind: RuntimeClass
+metadata:
+  name: gvisor

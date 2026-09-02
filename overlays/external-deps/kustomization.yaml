@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Example profile: control-plane state and object storage live outside the
+# cluster (a managed MySQL instance and an S3-compatible object store). No
+# default path references this overlay; copy it and replace the placeholders.
+# Read control-plane-external.yaml for the Secrets that must exist before applying.
+resources:
+  - ../../k8s
+
+patches:
+  - path: control-plane-external.yaml

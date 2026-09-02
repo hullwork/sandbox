@@ -1,0 +1,49 @@
+# CodeQL findings that .github/codeql-gate.sh must not fail on.
+#
+# Format, one finding per line, tab-separated:
+#   <rule id>	<file>	<primaryLocationLineHash>
+# The line hash is CodeQL's own content fingerprint for the flagged line. It
+# survives the file being reshuffled and stops matching the moment the flagged
+# line itself changes -- so an entry cannot silently keep excusing rewritten
+# code. The gate also fails on entries that match nothing, which forces a fixed
+# finding's line to be deleted here rather than left as a permanent hole.
+#
+# Every entry needs a reason above it. "CodeQL is noisy" is not a reason.
+
+# ---------------------------------------------------------------------------
+# False positive. core.py:3298 is `key.startswith("node-role.kubernetes.io/")`,
+# and the rule fires on any string literal that parses as a hostname. This one
+# is a Kubernetes label-key prefix, not a URL: `key` iterates
+# `node.metadata.labels` as returned by the Kubernetes API. The call sits
+# directly beside `key.removeprefix("node-role.kubernetes.io/")` -- the intent
+# is "strip this prefix", not "authorize this host". Parsing it as a host would
+# be less accurate, not more, so this is suppressed rather than rewritten.
+py/incomplete-url-substring-sanitization	control_plane/core.py	90a6e929eb9ec3c2:1
+
+# ---------------------------------------------------------------------------
+# False positive. api.py:1721 is `re.fullmatch(pattern, path)` inside the
+# `match_path` helper. CodeQL treats a parameter of a BaseHTTPRequestHandler
+# method as remote-controlled, but `pattern` is a literal raw string at all 23
+# call sites; the remote value is `path`, the subject being matched, which is
+# not a regex-injection sink. tests/test_route_completeness.py extracts those
+# literals from the source and requires the extracted set to equal the OpenAPI
+# paths, so a non-literal pattern would drop a route from the set and fail that
+# test.
+py/regex-injection	control_plane/api.py	f3c4bd5e557647f:1
+
+# ---------------------------------------------------------------------------
+# False positive. The sink is the rollback arm of `_swap_in_restored_tree`,
+# where `name` comes from `staging.iterdir()` -- a single directory-entry name,
+# which cannot contain a path separator. The taint source CodeQL follows is
+# `_safe_relative`, which already rejects absolute paths, `..` components and
+# the reserved `.sandbox` root before anything is written. CodeQL does not model
+# `PurePosixPath.parts` inspection as a sanitizer.
+py/path-injection	file-service/file_service.py	4e5e72e22fae8012:1
+
+# ---------------------------------------------------------------------------
+# False positive. `Math.random()` in the console's mock backend, used to make a
+# display placeholder for an API key. `api.ts` selects `mockApi` behind the
+# build-time constant `VITE_USE_MOCK`, so production bundles drop the module
+# entirely; no backend ever accepts the value. See the comment above `USE_MOCK`
+# in console/src/api.ts for the standing constraint on mock top-level code.
+js/insecure-randomness	console/src/mock.ts	2b6f3d1ef166692a:1

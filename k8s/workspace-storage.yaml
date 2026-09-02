@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sandbox-workspaces
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/name: sandbox-workspaces
+    app.kubernetes.io/managed-by: sandbox-controller
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: sandbox-rwx
+  resources:
+    requests:
+      storage: 100Gi

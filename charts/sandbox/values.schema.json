@@ -1,0 +1,168 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["images", "namespaces", "scheduling", "runtime", "services", "workspace", "postgresql", "objectStore", "tuning", "observability"],
+  "properties": {
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controlPlane", "runtime", "fileService", "console", "postgres"],
+      "properties": {
+        "controlPlane": {"$ref": "#/$defs/imageWithPolicy"},
+        "runtime": {"$ref": "#/$defs/image"},
+        "fileService": {"$ref": "#/$defs/imageWithPolicy"},
+        "console": {"$ref": "#/$defs/imageWithPolicy"},
+        "postgres": {"$ref": "#/$defs/imageWithPolicy"}
+      }
+    },
+    "namespaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system", "workloads"],
+      "properties": {
+        "system": {"type": "string", "minLength": 1},
+        "workloads": {"type": "string", "minLength": 1}
+      }
+    },
+    "scheduling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["system"],
+      "properties": {
+        "system": {"$ref": "#/$defs/scheduling"}
+      }
+    },
+    "runtime": {"$ref": "#/$defs/scheduling"},
+    "services": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["controlPlane", "console"],
+      "properties": {
+        "controlPlane": {"$ref": "#/$defs/service"},
+        "console": {"$ref": "#/$defs/service"}
+      }
+    },
+    "workspace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storageClass"],
+      "properties": {"storageClass": {"type": "string", "minLength": 1}}
+    },
+    "postgresql": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["embedded", "authSecret", "storageClass", "storageSize"],
+      "properties": {
+        "embedded": {"$ref": "#/$defs/feature"},
+        "authSecret": {"type": "string", "minLength": 1},
+        "storageClass": {"type": "string"},
+        "storageSize": {"type": "string", "minLength": 1}
+      }
+    },
+    "objectStore": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "uploadBucket", "agentBucket", "workspaceBucket", "healthPath"],
+      "properties": {
+        "endpoint": {"type": "string", "pattern": "^https?://"},
+        "uploadBucket": {"type": "string", "minLength": 1},
+        "agentBucket": {"type": "string", "minLength": 1},
+        "workspaceBucket": {"type": "string", "minLength": 1},
+        "healthPath": {"type": "string"}
+      }
+    },
+    "tuning": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maxRuntimes", "maxWorkspaces", "idleEvictSeconds", "maxInflightCreates", "workspaceQuota"],
+      "properties": {
+        "maxRuntimes": {"type": "integer", "minimum": 1},
+        "maxWorkspaces": {"type": "integer", "minimum": 1},
+        "idleEvictSeconds": {"type": "integer", "minimum": 0},
+        "maxInflightCreates": {"type": "integer", "minimum": 1},
+        "workspaceQuota": {"type": "string", "minLength": 1}
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tracing"],
+      "properties": {
+        "tracing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpoint", "serviceName"],
+          "properties": {
+            "endpoint": {"type": "string", "pattern": "^$|^https?://"},
+            "serviceName": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "feature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$"}
+      }
+    },
+    "imageWithPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^$|^sha256:[0-9a-f]{64}$"},
+        "pullPolicy": {"enum": ["Always", "IfNotPresent", "Never"]}
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["ClusterIP", "NodePort", "LoadBalancer"]},
+        "nodePort": {"type": ["integer", "null"], "minimum": 30000, "maximum": 32767}
+      }
+    },
+    "scheduling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeSelector", "tolerations"],
+      "properties": {
+        "nodeSelector": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "tolerations": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string"},
+              "operator": {"enum": ["Equal", "Exists"]},
+              "value": {"type": "string"},
+              "effect": {"enum": ["NoSchedule", "PreferNoSchedule", "NoExecute"]},
+              "tolerationSeconds": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    }
+  }
+}

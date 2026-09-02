@@ -1,0 +1,80 @@
+images:
+  controlPlane:
+    repository: ghcr.io/convee/sandbox-control-plane
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  runtime:
+    repository: ghcr.io/convee/sandbox-runtime
+    tag: "0.1.0"
+    digest: ""
+  fileService:
+    repository: ghcr.io/convee/sandbox-file-service
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  console:
+    repository: ghcr.io/convee/sandbox-console
+    tag: "0.1.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  postgres:
+    repository: postgres
+    tag: 17.10-alpine3.24
+    digest: sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    pullPolicy: IfNotPresent
+
+namespaces:
+  system: sandbox-system
+  workloads: sandbox-workloads
+
+scheduling:
+  system:
+    # Stable nodes that are not members of the disposable Runtime pool.
+    nodeSelector: {}
+    tolerations: []
+
+runtime:
+  # Keep the standalone chart schedulable on an unlabelled single-node cluster.
+  # Production node-pool adapters should set both fields together.
+  nodeSelector: {}
+  tolerations: []
+
+services:
+  controlPlane:
+    type: ClusterIP
+    nodePort: null
+  console:
+    type: ClusterIP
+    nodePort: null
+
+workspace:
+  storageClass: sandbox-rwx
+
+postgresql:
+  embedded:
+    enabled: true
+  authSecret: sandbox-postgres-auth
+  storageClass: ""
+  storageSize: 4Gi
+
+objectStore:
+  endpoint: http://rook-ceph-rgw-object-store.rook-ceph.svc.cluster.local:80
+  uploadBucket: user-uploads
+  agentBucket: agent-data
+  workspaceBucket: sandbox-workspaces
+  healthPath: ""
+
+tuning:
+  maxRuntimes: 4
+  maxWorkspaces: 64
+  idleEvictSeconds: 300
+  maxInflightCreates: 2
+  workspaceQuota: 1Gi
+
+observability:
+  tracing:
+    # Optional OTLP/HTTP JSON receiver, for example an OpenTelemetry Collector.
+    # Empty keeps tracing export disabled while trace-id log correlation remains.
+    endpoint: ""
+    serviceName: sandbox-control-plane

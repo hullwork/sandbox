@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rook-local-loop-device
+  namespace: rook-ceph
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rook-local-loop-device
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: rook-local-loop-device
+    spec:
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: prepare
+          image: quay.io/ceph/ceph:v20.2.4
+          command: ["/bin/bash", "-ec"]
+          args:
+            - |
+              image=/var/lib/rook-loop/osd.img
+              truncate -s "${ROOK_LOCAL_OSD_SIZE:-20G}" "$image"
+              device="$(losetup -j "$image" | cut -d: -f1 | head -1)"
+              if [ -z "$device" ]; then device="$(losetup --find --show "$image")"; fi
+              test -b "$device"
+              while true; do sleep 3600; done
+          securityContext:
+            privileged: true
+          resources:
+            requests: {cpu: 5m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: dev, mountPath: /dev}
+            - {name: loop-data, mountPath: /var/lib/rook-loop}
+      volumes:
+        - name: dev
+          hostPath: {path: /dev}
+        - name: loop-data
+          hostPath: {path: /var/lib/rook-loop, type: DirectoryOrCreate}

@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-volume
+  namespace: sandbox-workloads
+spec:
+ # RWO semantic regression: single copy Recreate (new and old Pods grab volumes during rolling).
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  template:
+    spec:
+ # Volume back to node binding (local-path), the volume role must be on the same node as Runtime.
+      nodeSelector:
+        sandbox.convee.io/node-role: runtime
+      tolerations:
+        - key: sandbox.convee.io/node-role
+          operator: Equal
+          value: runtime
+          effect: NoSchedule

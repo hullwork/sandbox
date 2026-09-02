@@ -1,0 +1,30 @@
+{
+  "name": "sandbox-console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "typecheck": "tsc -b --pretty false",
+    "test:i18n": "node scripts/check-i18n.mjs"
+  },
+  "dependencies": {
+    "lucide-react": "1.30.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "26.1.2",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "6.0.5",
+    "eslint": "10.8.0",
+    "globals": "17.9.0",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.66.0",
+    "vite": "8.2.1"
+  }
+}

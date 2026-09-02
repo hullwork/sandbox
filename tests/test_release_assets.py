@@ -1,0 +1,170 @@
+from __future__ import annotations
+
+import importlib.util
+import json
+import pathlib
+import re
+import tempfile
+import unittest
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "prepare_release_assets", ROOT / "scripts/prepare_release_assets.py"
+)
+assert SPEC and SPEC.loader
+release_assets = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(release_assets)
+
+
+class ReleaseManifestTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.temporary.name)
+        for component in release_assets.COMPONENT_IMAGES:
+            (self.root / f"image-{component}.json").write_text(
+                json.dumps(
+                    {
+                        "component": component,
+                        "image": f"ghcr.io/convee/sandbox-{component}",
+                        "digest": "sha256:" + ("a" * 64),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_manifest_uses_release_digests_for_workloads_and_runtime_env(self) -> None:
+        manifest_input = self.root / "base.yaml"
+        manifest_output = self.root / "release.yaml"
+        manifest_input.write_text(
+            """
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      containers:
+        - name: control_plane
+          image: sandbox-control-plane:0.7.0
+          imagePullPolicy: Never
+          env:
+            - name: SANDBOX_RUNTIME_IMAGE
+              value: sandbox-runtime:0.5.0
+        - name: workspace-maintenance
+          image: sandbox-file-service:0.3.0
+          imagePullPolicy: Never
+        - name: console
+          image: sandbox-console:0.1.0
+          imagePullPolicy: Never
+        - name: nfs-provisioner
+          image: registry.k8s.io/example/provisioner:v1
+          imagePullPolicy: Never
+""".lstrip(),
+            encoding="utf-8",
+        )
+        identities = release_assets.load_image_identities(self.root)
+        release_assets.render_manifest(manifest_input, manifest_output, identities)
+        rendered = manifest_output.read_text(encoding="utf-8")
+        self.assertNotIn("sandbox-control-plane:0.7.0", rendered)
+        self.assertEqual(rendered.count("@sha256:" + ("a" * 64)), 4)
+        self.assertNotIn("imagePullPolicy: Never", rendered)
+        self.assertEqual(rendered.count("imagePullPolicy: IfNotPresent"), 4)
+
+
+class ReleaseInventoryTests(unittest.TestCase):
+    def test_image_sbom_components_are_in_final_license_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "licenses.json").write_text(
+                json.dumps({"format": "v1", "python": [], "npm": [], "images": []}),
+                encoding="utf-8",
+            )
+            for component in release_assets.COMPONENT_IMAGES:
+                (root / f"image-{component}.cdx.json").write_text(
+                    json.dumps(
+                        {
+                            "bomFormat": "CycloneDX",
+                            "components": [
+                                {
+                                    "type": "library",
+                                    "name": f"dependency-{component}",
+                                    "version": "1.2.3",
+                                    "purl": f"pkg:pypi/dependency-{component}@1.2.3",
+                                    "licenses": [{"license": {"id": "MIT"}}],
+                                }
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            release_assets.merge_image_sboms(root)
+            inventory = json.loads((root / "licenses.json").read_text(encoding="utf-8"))
+            self.assertEqual(inventory["format"], "sandbox-license-inventory-v2")
+            self.assertEqual(len(inventory["image_components"]), 4)
+            self.assertTrue(
+                all(item["license"] == "MIT" for item in inventory["image_components"])
+            )
+            self.assertIn(
+                "image:runtime", (root / "licenses.md").read_text(encoding="utf-8")
+            )
+
+
+class ReleaseWorkflowContractTests(unittest.TestCase):
+    def test_release_is_gated_by_full_ci_and_public_main_tag(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("workflow_call:", ci)
+        self.assertIn("uses: ./.github/workflows/ci.yml", release)
+        self.assertIn("needs: ci", release)
+        self.assertIn("release tag must be annotated", release)
+        self.assertIn("release tag commit must be reachable from origin/main", release)
+        self.assertIn("repository is public", release)
+        self.assertIn("prepare_release_assets.py", release)
+        self.assertIn("--draft", release)
+
+    def test_release_scans_before_promoting_official_image_tags(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        scan = release.index("Scan staged image before promotion")
+        promote = release.index("Promote scanned digest to official tags")
+        sign = release.index("Sign promoted image digest")
+        self.assertLess(scan, promote)
+        self.assertLess(promote, sign)
+        self.assertIn("tags: ${{ steps.image.outputs.staging }}", release)
+        self.assertNotIn("Scan published image", release)
+
+    def test_checkout_never_persists_workflow_credentials(self) -> None:
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            source = path.read_text(encoding="utf-8")
+            positions = [match.start() for match in re.finditer("actions/checkout@", source)]
+            for index, start in enumerate(positions):
+                end = positions[index + 1] if index + 1 < len(positions) else len(source)
+                step = source[start:end]
+                self.assertIn("persist-credentials: false", step, str(path))
+
+    def test_gitleaks_is_checksum_pinned_and_has_only_a_precise_fixture_exception(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("GITLEAKS_VERSION: 8.30.1", ci)
+        self.assertIn(
+            "GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
+            ci,
+        )
+        self.assertNotIn("gitleaks/gitleaks-action", ci)
+        exceptions = [
+            line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+            if line and not line.startswith("#")
+        ]
+        self.assertEqual(exceptions, [
+            "91c0ee2192d9b8e2ea1223ff9a77e633b9c3821e:"
+            "tests/test_api_authorization.py:generic-api-key:267"
+        ])
+
+    def test_lima_uses_an_immutable_ubuntu_image_url(self) -> None:
+        lima = (ROOT / "scripts/local-cluster.yaml").read_text(encoding="utf-8")
+        self.assertNotIn("/current/", lima)
+        self.assertEqual(lima.count("/20260814/"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

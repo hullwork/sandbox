@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Local integration profile. Runtime Pods use the installed gVisor RuntimeClass.
+# SQLite and local-path workspace/object PVCs keep the profile self-contained;
+# they are not a production durability topology. Control-plane state or objects
+# hosted outside the cluster are an explicit opt-in: see overlays/external-deps.
+resources:
+  - ../rwo-single-node
+
+components:
+  - ../local-dev

@@ -1,0 +1,71 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: sandbox-workspace-init
+  namespace: sandbox-workloads
+  annotations:
+    # The initializer is safe to rerun; recreate instead of patching its
+    # immutable Pod template when the workspace utility image changes.
+    argocd.argoproj.io/sync-options: Force=true,Replace=true
+  labels:
+    app.kubernetes.io/name: sandbox-workspace-init
+    app.kubernetes.io/managed-by: sandbox-controller
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-workspace-init
+        app.kubernetes.io/managed-by: sandbox-controller
+    spec:
+ #Scheduling no longer pins nodes (Phase 2 flip, see volume-agent.yaml description):
+ # Any node under RWX storage can run init.
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: init
+          image: sandbox-file-service:0.3.0
+          imagePullPolicy: Never
+          command:
+            - python3
+            - -c
+            - |
+              from pathlib import Path
+              root = Path("/workspaces")
+              root.mkdir(parents=True, exist_ok=True)
+              probe = root / ".workspace-volume-ready"
+              probe.write_text("ready\n", encoding="utf-8")
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 5m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 48Mi
+          volumeMounts:
+            - name: workspaces
+              mountPath: /workspaces
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: sandbox-workspaces
+        - name: tmp
+          emptyDir:
+            sizeLimit: 8Mi

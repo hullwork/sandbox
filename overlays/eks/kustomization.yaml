@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# EKS adapter. The cluster operator must install and configure the EFS CSI
+# StorageClass before applying this overlay. Application settings remain the same
+# as the provider-neutral base.
+resources:
+  - ../../k8s
+patches:
+  - path: workspace-storage-efs.yaml

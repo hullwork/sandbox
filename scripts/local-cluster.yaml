@@ -1,0 +1,58 @@
+images:
+  - location: https://cloud-images.ubuntu.com/noble/20260814/noble-server-cloudimg-amd64.img
+    arch: x86_64
+    digest: sha256:6e40c07ae715f744f84af0bec76415cc1987dd115b4b8de437818561f01a3733
+  - location: https://cloud-images.ubuntu.com/noble/20260814/noble-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:4a281a921b8d7db952895ab619736f10efe9f63e111fa5b5779ed18f023818aa
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+containerd:
+  system: false
+  user: false
+mounts: []
+portForwards:
+  - guestPort: 6443
+    hostPort: 18448
+    static: true
+  - guestPort: 30080
+    hostPort: 18080
+    static: true
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eux
+      swapoff -a
+      sed -i.bak '/[[:space:]]swap[[:space:]]/s/^/#/' /etc/fstab
+      modprobe overlay
+      modprobe br_netfilter
+      cat >/etc/modules-load.d/sandbox.conf <<'EOF'
+      overlay
+      br_netfilter
+      EOF
+      cat >/etc/sysctl.d/99-sandbox-kubernetes.conf <<'EOF'
+      net.bridge.bridge-nf-call-iptables=1
+      net.bridge.bridge-nf-call-ip6tables=1
+      net.ipv4.ip_forward=1
+      EOF
+      sysctl --system
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq containerd apt-transport-https ca-certificates curl gpg
+      mkdir -p /etc/containerd /etc/apt/keyrings
+      containerd config default >/etc/containerd/config.toml
+      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      # apt starts containerd before the generated configuration exists. Restart
+      # it explicitly so kubelet's CRI cgroup-driver discovery sees systemd from
+      # its first boot rather than caching containerd's built-in cgroupfs default.
+      systemctl enable containerd
+      systemctl restart containerd
+      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
+        | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /' \
+        >/etc/apt/sources.list.d/kubernetes.list
+      apt-get update -qq
+      apt-get install -y -qq kubelet=1.36.* kubeadm=1.36.* kubectl=1.36.*
+      apt-mark hold kubelet kubeadm kubectl

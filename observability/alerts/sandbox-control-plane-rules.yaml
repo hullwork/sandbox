@@ -1,0 +1,237 @@
+# Sandbox control-plane alert rules - a product artifact, not a deployment.
+#
+# This repository ships no Prometheus, no Loki and no Grafana. It ships the
+# things a Prometheus needs in order to watch it: this rule file, the scrape
+# samples in observability/scrape/, and the dashboard in observability/dashboards/.
+# Import them into whichever monitoring stack the operator already runs:
+#   kubectl apply -f observability/alerts/sandbox-control-plane-rules.yaml
+#   or lift .spec.groups into a plain rule_files entry.
+#
+# 🔴 Every sandbox_* metric named below is registered in control_plane/core.py.
+# tests/test_observability_artifacts.py asserts that: a rule naming a metric the
+# code never emits does not fail, it evaluates to an empty vector forever and the
+# control-plane is "monitored" with zero coverage.
+#
+# Job name: the rules match `sandbox-control-plane.*`, which is what
+# observability/scrape/servicemonitor.yaml produces. Keep any renaming inside
+# that prefix.
+#
+# Label values interpolated below (reason, gate, job, instance) are all closed
+# enumerations - core.py::create_failure_reason maps every exception into a
+# fixed set precisely so exception text can never become a label. No tenant,
+# workspace or sandbox identifier exists on any of these series, and none may be
+# introduced through an annotation either: /metrics is unauthenticated.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sandbox-control-plane-rules
+  labels:
+    app.kubernetes.io/name: sandbox-control-plane
+    app.kubernetes.io/part-of: sandbox
+spec:
+  groups:
+    - name: sandbox-control-plane
+      rules:
+        # Every sandbox_* series disappears with the process, so `up` is the
+        # only signal that survives the thing it reports on. Silent while the
+        # control-plane answers, however badly.
+        - alert: SandboxControlPlaneDown
+          expr: up{job=~"sandbox-control-plane.*"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: sandbox-control-plane is not scrapable
+            description: >-
+              Prometheus cannot scrape {{ $labels.job }} ({{ $labels.instance }})
+              for 2m. No agent can obtain or reach a sandbox.
+        # Admitted creations that never became healthy. `reason` separates the
+        # cases that need different actions: quota / namespace_quota is capacity,
+        # forbidden is broken RBAC, not_ready_in_time is a slow or unschedulable
+        # image, store_error is the control-plane database. Zero when creations
+        # succeed; a rejected-at-admission request never reaches this counter
+        # (that is sandbox_quota_rejections_total).
+        - alert: SandboxRuntimeCreateFailed
+          expr: increase(sandbox_runtime_create_failures_total[15m]) > 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Sandbox runtime creation is failing (reason={{ $labels.reason }})
+            description: >-
+              {{ $value | humanize }} runtime creations failed in 15m with
+              reason={{ $labels.reason }}. Agents asking for a sandbox are
+              getting errors.
+        # Admission refusals. Occasional 429s are the design working - the pool
+        # is finite and LRU eviction backs it up. A sustained rate means either
+        # capacity is genuinely short or idle eviction has stopped reclaiming.
+        # `gate` says which ceiling was hit: global pool, per-tenant, or
+        # per-tenant workspace.
+        - alert: SandboxQuotaRejectionsSustained
+          expr: increase(sandbox_quota_rejections_total[15m]) > 30
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Sandbox admissions are being refused (gate={{ $labels.gate }})
+            description: >-
+              {{ $value | humanize }} admissions refused in 15m at the
+              {{ $labels.gate }} gate. The pool is persistently saturated or
+              idle eviction is not reclaiming.
+        # 🔴 Reads a deliberate absence. core.py::store_gauge raises rather
+        # than returning 0 when it cannot take the control-plane store lock, and
+        # metrics.py::Gauge.render then drops the whole metric - "cannot count"
+        # must never be published as "zero", or a busy store reads as an idle
+        # system. The consequence is that the series vanishing *is* the signal:
+        # the store has been too busy to answer for a full scrape window, and
+        # every authenticated request pays the same price.
+        # Silent when the store answers (series present, any value), and silent
+        # when the control-plane is down - `up == 1` keeps this from double-firing with
+        # SandboxControlPlaneDown, which is the alert that case belongs to.
+        - alert: SandboxControlPlaneStoreBusy
+          expr: up{job=~"sandbox-control-plane.*"} == 1 unless sandbox_runtimes_live
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: sandbox-control-plane cannot read its control-plane store
+            description: >-
+              {{ $labels.instance }} is scrapable but has published no
+              sandbox_runtimes_live sample for 5m: the store lock could not be
+              taken. Authenticated requests make at least three store calls
+              each, so they are paying the same wait.
+        - alert: SandboxStoreErrors
+          expr: increase(sandbox_store_errors_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Control-plane store failures are reaching callers
+            description: >-
+              {{ $value | humanize }} store failures surfaced to callers in 10m.
+              Unlike SandboxControlPlaneStoreBusy these are errors returned to
+              the client, not scrapes that yielded.
+        # An audit row that could not be written is a hole in the record of who
+        # did what, and nothing downstream replays it. Critical at any rate:
+        # unlike a failed request there is no retry and no user to notice.
+        - alert: SandboxAuditWriteFailures
+          expr: increase(sandbox_audit_write_failures_total[15m]) > 0
+          for: 0m
+          labels:
+            severity: critical
+          annotations:
+            summary: Sandbox audit rows are being dropped
+            description: >-
+              {{ $value | humanize }} audit rows could not be written in 15m.
+              Actions took effect with no audit trail; they cannot be
+              reconstructed later.
+        # The bucket ceiling is 90s because that is the Pod-readiness wait, so a
+        # p95 above 60s means most creations are approaching the timeout rather
+        # than crossing it - the window where agents feel it before
+        # SandboxRuntimeCreateFailed says anything. Silent at normal cold-start
+        # times (single-digit seconds to low tens).
+        - alert: SandboxRuntimeCreateSlow
+          expr: >-
+            histogram_quantile(0.95, rate(sandbox_runtime_create_seconds_bucket[15m])) > 60
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Sandbox cold starts are approaching the readiness timeout
+            description: >-
+              p95 runtime creation took {{ $value | humanizeDuration }} over 15m
+              against a 90s readiness ceiling. The next step is
+              reason="not_ready_in_time" failures.
+        # min_over_time, not the instantaneous value: under normal churn there is
+        # almost always some creation in flight, so `> 0` would page every busy
+        # afternoon. Never returning to zero across 30 minutes is different - a
+        # create-* thread is wedged, and each one holds a quota slot and a
+        # running Pod that the client is still polling for.
+        - alert: SandboxCreationThreadsWedged
+          expr: min_over_time(sandbox_creates_inflight[30m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: Background sandbox provisioning never drains
+            description: >-
+              sandbox_creates_inflight has not touched zero for 30m. At least one
+              create-* thread is stuck holding a quota slot and a running Pod.
+        # A ratio, not a literal. The queue ceiling is configurable, and a
+        # threshold hard-coded to today's default does not fail loudly when the
+        # variable is raised - it simply stops firing, which is the worst shape
+        # a rule can have. Both series are published on every scrape, so the
+        # denominator always exists.
+        - alert: SandboxObjectStoreQueueSaturated
+          expr: >-
+            sandbox_mc_queue_depth / sandbox_mc_queue_limit > 0.75
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: Object-store queue is close to refusing requests
+            description: >-
+              {{ $value | humanizePercentage }} of the object-store queue has
+              been occupied for 10m. At the ceiling, checkpoint and artifact
+              writes are refused with 503 outright.
+        # Object tickets are the whole browser-facing upload/download path, and
+        # every failure mode ends as an identical 401 to the caller - the Control Plane
+        # has no HTTP response counter, so a tenant whose uploads all fail was
+        # previously invisible. `reason` is a closed set and says what to do:
+        # bad_signature means the signing key rotated under someone,
+        # claims_rejected covers expiry and scope, malformed is a broken client,
+        # and replayed means the ticket was already spent.
+        #
+        # Silent at zero rather than absent: the counter is pre-registered at 0
+        # for all four reasons at startup, so "never failed" is a real reading.
+        - alert: SandboxObjectTicketFailures
+          expr: increase(sandbox_object_ticket_failures_total[15m]) > 10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Object tickets are being refused (reason={{ $labels.reason }})
+            description: >-
+              {{ $value | humanize }} object tickets refused in 15m with
+              reason={{ $labels.reason }}. Uploads and downloads through the
+              browser are failing with 401.
+        - alert: SandboxHttp5xxRatioHigh
+          expr: >-
+            sum(rate(sandbox_http_requests_total{status_class="5xx"}[10m]))
+            /
+            clamp_min(sum(rate(sandbox_http_requests_total[10m])), 0.001)
+            > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: Sandbox control-plane 5xx ratio is high
+            description: >-
+              {{ $value | humanizePercentage }} of control-plane requests have
+              returned 5xx over 10m. Inspect the route RED dashboard and the
+              trace id in the corresponding request logs.
+        - alert: SandboxObjectStoreOperationsFailing
+          expr: >-
+            sum by (operation) (
+              increase(sandbox_object_store_operations_total{outcome="error"}[10m])
+            ) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Sandbox object-store operation is failing
+            description: >-
+              {{ $value | humanize }} object-store operations failed in 10m
+              for operation={{ $labels.operation }}. Workspace metadata may be
+              healthy while checkpoint or artifact persistence is degraded.
+        - alert: SandboxTraceExportDropping
+          expr: increase(sandbox_trace_export_drops_total[10m]) > 0
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: Sandbox spans are being dropped
+            description: >-
+              {{ $value | humanize }} spans were dropped in 10m because the
+              OTLP collector was unavailable or the bounded exporter queue was
+              full. Serving continues, but trace coverage is incomplete.

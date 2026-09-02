@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sandbox-workload-limits
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/managed-by: sandbox-controller
+# ResourceQuota limits the namespace total; LimitRange supplies defaults and
+# bounds individual containers, including workloads created outside Control Plane.
+spec:
+  limits:
+    - type: Container
+      # Defaults apply only when a container omits resources.
+      default:
+        cpu: 500m
+        memory: 512Mi
+      defaultRequest:
+        cpu: 25m
+        memory: 64Mi
+      # Prevent one container from consuming the namespace quota.
+      max:
+        cpu: "1"
+        memory: 768Mi

@@ -1,0 +1,41 @@
+# How to scrape the sandbox control-plane. Samples, not a deployment: this repository
+# ships no Prometheus, and choosing a collector is the operator's call.
+#
+# /metrics sits at the same authentication level as /livez, /readyz and /healthz
+# - unauthenticated, with NetworkPolicy deciding who may reach it (see
+# k8s/network-policy.yaml). That is safe *because* of a deliberate choice
+# documented at control_plane/core.py::METRICS: there is no tenant label on any
+# series, so the endpoint cannot be used to enumerate tenants. Per-tenant usage
+# is served by the authenticated /v1/admin routes instead. Do not add a tenant
+# label without moving the endpoint behind auth first.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: sandbox-control-plane
+  labels:
+    app.kubernetes.io/name: sandbox-control-plane
+    app.kubernetes.io/part-of: sandbox
+spec:
+  namespaceSelector:
+    matchNames: ["sandbox-system"]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-control-plane
+  endpoints:
+    # The alert rules match job=~"sandbox-control-plane.*"; the Operator derives `job`
+    # from the Service name, which is sandbox-control-plane.
+    - port: http
+      path: /metrics
+      interval: 30s
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-scrape-config-sample
+data:
+  scrape_configs.yml: |
+    scrape_configs:
+      - job_name: sandbox-control-plane
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["sandbox-control-plane.sandbox-system.svc:8080"]

@@ -1,0 +1,29 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Capacity and lifecycle settings consumed by Control Plane.
+generatorOptions:
+  disableNameSuffixHash: true
+configMapGenerator:
+  - name: sandbox-tuning
+    namespace: sandbox-system
+    literals:
+      - SANDBOX_MAX_RUNTIMES=4
+      - SANDBOX_MAX_WORKSPACES=64
+      - SANDBOX_IDLE_EVICT_SECONDS=300
+      - SANDBOX_MAX_INFLIGHT_CREATES=2
+      - SANDBOX_WORKSPACE_QUOTA=1Gi
+resources:
+  - namespaces.yaml
+  - platform/runtime-class.yaml
+  - rbac.yaml
+  - workspace-storage.yaml
+  - workspace-init.yaml
+  - workspace-gc.yaml
+  - workload-quota.yaml
+  - limit-range.yaml
+  - network-policy.yaml
+  - object-store.yaml
+  - volume-agent.yaml
+  - control-plane.yaml
+  - console.yaml

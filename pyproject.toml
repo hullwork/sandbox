@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sandbox-platform"
+version = "0.1.0"
+description = "Execution-as-a-service SDK, MCP bridge, and operator CLI for Sandbox Platform"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Convee" }]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+]
+
+[project.urls]
+Homepage = "https://github.com/convee/sandbox"
+Repository = "https://github.com/convee/sandbox"
+Issues = "https://github.com/convee/sandbox/issues"
+
+[project.scripts]
+sandbox-mcp = "sandbox_platform.mcp:main"
+sandbox = "sandbox_platform.sandbox_cli:main"
+sandboxctl = "sandbox_platform.sandboxctl:main"
+
+[project.optional-dependencies]
+test = ["PyYAML>=6.0,<7"]
+
+[tool.hatch.build.targets.wheel]
+# The wheel ships only the supported client surface, namespaced under
+# sandbox_platform so it never shadows the PyPI `mcp` SDK. Control Plane, Runtime, and
+# Kubernetes resources are distributed through container images and manifests.
+packages = ["sandbox_platform"]
+# Editable installs expose exactly this package instead of adding the
+# repository root to sys.path (which would leak control_plane/, runtime/, tests/).
+dev-mode-exact = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "sandbox_platform/",
+  "README.md",
+  "LICENSE",
+  "pyproject.toml",
+]

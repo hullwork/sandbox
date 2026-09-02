@@ -1,0 +1,103 @@
+{{- if .Values.postgresql.embedded.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-postgres
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  selector:
+    app.kubernetes.io/name: sandbox-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: sandbox-postgres
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  serviceName: sandbox-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-postgres
+    spec:
+{{ include "sandbox.systemScheduling" . | nindent 6 }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: {{ include "sandbox.image" (list .Values.images.postgres) }}
+          imagePullPolicy: {{ .Values.images.postgres.pullPolicy }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.authSecret }}
+                  key: username
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.authSecret }}
+                  key: database
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.postgresql.authSecret }}
+                  key: password
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.postgresql.storageClass }}
+        storageClassName: {{ .Values.postgresql.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.postgresql.storageSize }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sandbox-postgres-ingress
+  namespace: {{ .Values.namespaces.system }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: sandbox-control-plane
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}

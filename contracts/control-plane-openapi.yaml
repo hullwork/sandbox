@@ -1,0 +1,1143 @@
+openapi: 3.1.0
+info:
+  title: Sandbox Control Plane API
+  version: 0.1.0
+  description: |
+    Public control-plane contract. Workspace and sandbox resources are tenant
+    scoped. File-service, object-store, and MCP proxy payloads intentionally
+    allow extension fields where the backend protocol is forward compatible.
+servers:
+  - url: /
+tags:
+  - {name: Operations}
+  - {name: Authentication}
+  - {name: Workspaces}
+  - {name: Sandboxes}
+  - {name: Monitoring}
+  - {name: Files}
+  - {name: Objects}
+  - {name: Administration}
+
+# YAML merge anchors keep the checked-in contract readable. They are resolved
+# before OpenAPI tooling sees the document; x-* fields are valid extensions.
+x-operation-templates:
+  control-read: &controlRead
+    security: [{controlPlaneToken: []}]
+    responses:
+      '200': {$ref: '#/components/responses/GenericObject'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+  control-delete: &controlDelete
+    security: [{controlPlaneToken: []}]
+    responses:
+      '200': {$ref: '#/components/responses/Deleted'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '404': {$ref: '#/components/responses/NotFound'}
+  scoped-create: &scopedCreate
+    security: [{scopedToken: []}]
+    responses:
+      '201': {$ref: '#/components/responses/GenericObject'}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '409': {$ref: '#/components/responses/Conflict'}
+  admin-read: &adminRead
+    security: [{adminKey: []}]
+    responses:
+      '200': {$ref: '#/components/responses/GenericObject'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+  admin-delete: &adminDelete
+    security: [{adminKey: []}]
+    responses:
+      '200': {$ref: '#/components/responses/Deleted'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '403': {$ref: '#/components/responses/Forbidden'}
+      '404': {$ref: '#/components/responses/NotFound'}
+  workspace-file-read: &workspaceFileRead
+    tags: [Files]
+    security: [{controlPlaneToken: []}, {scopedToken: []}]
+    responses:
+      '200': {$ref: '#/components/responses/GenericObject'}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '404': {$ref: '#/components/responses/NotFound'}
+      '409': {$ref: '#/components/responses/Conflict'}
+  workspace-file-write: &workspaceFileWrite
+    tags: [Files]
+    security: [{scopedToken: []}]
+    responses:
+      '200': {$ref: '#/components/responses/GenericObject'}
+      '400': {$ref: '#/components/responses/BadRequest'}
+      '401': {$ref: '#/components/responses/Unauthorized'}
+      '409': {$ref: '#/components/responses/Conflict'}
+
+paths:
+  /livez:
+    get:
+      operationId: getLiveness
+      tags: [Operations]
+      summary: Report whether the Control Plane process is alive
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/Liveness'}
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [Operations]
+      summary: Report whether this replica can accept traffic
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/Readiness'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /healthz:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Probe Kubernetes, PostgreSQL, and object-storage dependencies
+      security: []
+      responses:
+        '200': {$ref: '#/components/responses/Health'}
+        '503': {$ref: '#/components/responses/HealthUnavailable'}
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [Operations]
+      summary: Export Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus text exposition
+          content: {text/plain: {schema: {type: string}}}
+  /v1/auth/methods:
+    get:
+      operationId: getAuthMethods
+      tags: [Authentication]
+      summary: Which sign-in methods this deployment offers
+      security: []
+      responses:
+        '200':
+          description: Sign-in methods
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [local_login, oidc]
+                additionalProperties: false
+                properties:
+                  local_login: {type: boolean, description: Static break-glass token accepted}
+                  oidc: {type: boolean, description: An OpenID Connect provider is configured}
+  /v1/auth/oidc/login:
+    get:
+      operationId: beginOidcLogin
+      tags: [Authentication]
+      summary: Start Authorization Code + PKCE at the configured provider
+      security: []
+      responses:
+        '302':
+          description: Redirect to the provider authorization endpoint
+          headers:
+            Location: {schema: {type: string}}
+            Set-Cookie: {schema: {type: string}}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '502': {$ref: '#/components/responses/BadRequest'}
+  /v1/auth/oidc/callback:
+    get:
+      operationId: completeOidcLogin
+      tags: [Authentication]
+      summary: Exchange the authorization code for a Console session
+      security: []
+      parameters:
+        - {name: code, in: query, schema: {type: string, maxLength: 4096}}
+        - {name: state, in: query, schema: {type: string}}
+        - {name: error, in: query, schema: {type: string}}
+      responses:
+        '303':
+          description: Session created and redirected to the console root
+          headers:
+            Location: {schema: {type: string, const: /}}
+            Set-Cookie: {schema: {type: string}}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/auth/logout:
+    post:
+      operationId: deleteControlSession
+      tags: [Authentication]
+      summary: Clear browser session and CSRF cookies
+      security: [{browserSession: []}, {controlPlaneToken: []}]
+      responses:
+        '204': {description: Session cookies cleared}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/whoami:
+    get:
+      <<: *controlRead
+      operationId: getCurrentIdentity
+      tags: [Authentication]
+      responses:
+        '200':
+          description: Effective caller identity
+          content: {application/json: {schema: {$ref: '#/components/schemas/Identity'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/templates:
+    get:
+      <<: *controlRead
+      operationId: listTemplates
+      tags: [Sandboxes]
+      responses:
+        '200':
+          description: Visible template identifiers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [templates]
+                properties: {templates: {type: array, items: {type: string}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/workspaces:
+    get:
+      <<: *controlRead
+      operationId: listWorkspaces
+      tags: [Workspaces]
+      responses:
+        '200':
+          description: Visible workspaces
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [workspaces]
+                properties: {workspaces: {type: array, items: {$ref: '#/components/schemas/Workspace'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: createWorkspace
+      tags: [Workspaces]
+      security: [{controlPlaneToken: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateWorkspace'}
+      responses:
+        '201':
+          description: Workspace created
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceLease'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+  /v1/workspaces/resolve:
+    post:
+      operationId: resolveWorkspace
+      tags: [Workspaces]
+      summary: Resolve one authenticated session without creating or enumerating workspaces
+      security: [{controlPlaneToken: []}]
+      requestBody: {$ref: '#/components/requestBodies/ResolveWorkspace'}
+      responses:
+        '200':
+          description: Workspace and current ready Runtime resolution
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceResolution'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/workspaces/{workspace_id}:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    delete:
+      <<: *controlDelete
+      operationId: deleteWorkspace
+      tags: [Workspaces]
+      summary: Delete a workspace and its durable data; purge=true also deletes checkpoints
+      parameters: [{name: purge, in: query, schema: {type: boolean, default: false}}]
+      responses:
+        '200':
+          description: Workspace deleted
+          content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceDeleted'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/workspaces/{workspace_id}/checkpoints:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *controlRead
+      operationId: listWorkspaceCheckpoints
+      tags: [Workspaces]
+      responses:
+        '200':
+          description: Workspace checkpoints
+          content: {application/json: {schema: {$ref: '#/components/schemas/CheckpointList'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: createWorkspaceCheckpoint
+      tags: [Workspaces]
+      security: [{controlPlaneToken: []}]
+      responses:
+        '201':
+          description: Checkpoint created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Checkpoint'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/workspaces/{workspace_id}/checkpoints/{checkpoint_id}:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}, {$ref: '#/components/parameters/CheckpointId'}]
+    delete:
+      <<: *controlDelete
+      operationId: deleteWorkspaceCheckpoint
+      tags: [Workspaces]
+      responses:
+        '200':
+          description: Checkpoint deleted
+          content: {application/json: {schema: {$ref: '#/components/schemas/CheckpointDeleted'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/workspaces/{workspace_id}/checkpoints/{checkpoint_id}/restore:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}, {$ref: '#/components/parameters/CheckpointId'}]
+    post:
+      operationId: restoreWorkspaceCheckpoint
+      tags: [Workspaces]
+      security: [{controlPlaneToken: []}]
+      requestBody:
+        required: false
+        content: {application/json: {schema: {type: object, properties: {sha256: {$ref: '#/components/schemas/Sha256'}}}}}
+      responses:
+        '200':
+          description: Checkpoint restored
+          content: {application/json: {schema: {$ref: '#/components/schemas/CheckpointRestore'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/sandboxes:
+    get:
+      <<: *controlRead
+      operationId: listSandboxes
+      tags: [Sandboxes]
+      responses:
+        '200':
+          description: Visible sandboxes
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sandboxes]
+                properties: {sandboxes: {type: array, items: {$ref: '#/components/schemas/Sandbox'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      operationId: createSandbox
+      tags: [Sandboxes]
+      security: [{controlPlaneToken: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateSandbox'}
+      responses:
+        '201':
+          description: Sandbox became ready before the request deadline
+          content: {application/json: {schema: {$ref: '#/components/schemas/SandboxLease'}}}
+        '202':
+          description: Sandbox creation remains pending (wait=false); the lease is issued before the Runtime exists
+          content: {application/json: {schema: {$ref: '#/components/schemas/SandboxLease'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/TooManyRequests'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+        '504': {$ref: '#/components/responses/GatewayTimeout'}
+  /v1/monitoring:
+    get:
+      <<: *controlRead
+      operationId: getMonitoringSnapshot
+      tags: [Monitoring]
+      summary: Read scoped node and Runtime resource monitoring
+      description: |
+        Global identities receive cluster nodes and all Runtimes. Tenant-scoped
+        identities receive only their Runtimes and never receive node topology.
+        Actual CPU and memory usage is nullable when metrics.k8s.io is unavailable;
+        core health, capacity, requests, and limits remain available.
+      responses:
+        '200':
+          description: Current monitoring snapshot
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MonitoringSnapshot'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /v1/sandboxes/{sandbox_id}:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    get:
+      <<: *controlRead
+      operationId: getSandbox
+      tags: [Sandboxes]
+      description: |
+        Pending Runtimes (asynchronous creation) and released Runtimes are
+        reported from the control-plane record, so only id and status are
+        guaranteed; a live Runtime returns the full Pod-derived view.
+      responses:
+        '200':
+          description: Sandbox state
+          content: {application/json: {schema: {$ref: '#/components/schemas/Sandbox'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      <<: *controlDelete
+      operationId: deleteSandbox
+      tags: [Sandboxes]
+      responses:
+        '200':
+          description: Runtime released
+          content: {application/json: {schema: {$ref: '#/components/schemas/SandboxReleased'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/sandboxes/{sandbox_id}/token:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    post:
+      operationId: createSandboxToken
+      tags: [Sandboxes]
+      security: [{controlPlaneToken: []}]
+      responses:
+        '200':
+          description: Short-lived scoped token
+          content: {application/json: {schema: {$ref: '#/components/schemas/ScopedToken'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  # Workspace file routes are proxied to the Runtime file service. The read
+  # subset accepts control-plane credentials (with ownership) or a workspace
+  # scoped token; the write subset accepts the scoped token only. Every route
+  # answers 409 when the workspace has no running Runtime.
+  /v1/workspaces/{workspace_id}/files/list:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *workspaceFileRead
+      operationId: listWorkspaceFiles
+      parameters: [{$ref: '#/components/parameters/PathQuery'}]
+  /v1/workspaces/{workspace_id}/files/read:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *workspaceFileRead
+      operationId: readWorkspaceFile
+      parameters: [{$ref: '#/components/parameters/FilePathQuery'}, {name: offset, in: query, schema: {type: integer, minimum: 1, default: 1}}, {name: limit, in: query, schema: {type: integer, minimum: 0, default: 0}}]
+  /v1/workspaces/{workspace_id}/files/read-binary:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *workspaceFileRead
+      operationId: readWorkspaceFileBinary
+      parameters: [{$ref: '#/components/parameters/FilePathQuery'}]
+  /v1/workspaces/{workspace_id}/files/glob:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *workspaceFileRead
+      operationId: globWorkspaceFiles
+      parameters: [{$ref: '#/components/parameters/PathQuery'}, {name: pattern, in: query, required: true, schema: {type: string}}, {name: limit, in: query, schema: {type: integer, minimum: 0, default: 0}}]
+  /v1/workspaces/{workspace_id}/files/grep:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    get:
+      <<: *workspaceFileRead
+      operationId: grepWorkspaceFiles
+      parameters: [{$ref: '#/components/parameters/PathQuery'}, {name: pattern, in: query, required: true, schema: {type: string}}, {name: glob, in: query, schema: {type: string}}, {name: mode, in: query, schema: {type: string, enum: [files_with_matches, content, count], default: files_with_matches}}, {name: case_insensitive, in: query, schema: {type: boolean, default: false}}, {name: context, in: query, schema: {type: integer, minimum: 0, default: 0}}, {name: regex, in: query, schema: {type: boolean, default: false}}, {name: limit, in: query, schema: {type: integer, minimum: 0, default: 0}}]
+  /v1/workspaces/{workspace_id}/files/write:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    post:
+      <<: *workspaceFileWrite
+      operationId: writeWorkspaceFile
+      requestBody: {$ref: '#/components/requestBodies/WriteFile'}
+  /v1/workspaces/{workspace_id}/files/write-binary:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    post:
+      <<: *workspaceFileWrite
+      operationId: writeWorkspaceFileBinary
+      requestBody: {$ref: '#/components/requestBodies/WriteFileBinary'}
+  /v1/workspaces/{workspace_id}/files/edit:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    post:
+      <<: *workspaceFileWrite
+      operationId: editWorkspaceFile
+      requestBody: {$ref: '#/components/requestBodies/EditFile'}
+  /v1/workspaces/{workspace_id}/objects/import:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    post:
+      <<: *scopedCreate
+      operationId: importObjectToWorkspace
+      tags: [Objects]
+      requestBody: {$ref: '#/components/requestBodies/WorkspaceImport'}
+  /v1/workspaces/{workspace_id}/objects/export:
+    parameters: [{$ref: '#/components/parameters/WorkspaceId'}]
+    post:
+      <<: *scopedCreate
+      operationId: exportWorkspaceObject
+      tags: [Objects]
+      requestBody: {$ref: '#/components/requestBodies/WorkspaceExport'}
+  /v1/sandboxes/{sandbox_id}/mcp:
+    parameters: [{$ref: '#/components/parameters/SandboxId'}]
+    post:
+      operationId: callSandboxMcp
+      tags: [Sandboxes]
+      description: Proxies MCP JSON-RPC and SSE without rewriting protocol payloads.
+      security: [{scopedToken: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/JsonRpcMessage'}}}
+      responses:
+        '200':
+          description: MCP JSON-RPC response or event stream
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/JsonRpcMessage'}}
+            text/event-stream: {schema: {type: string}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/storage/content:
+    get:
+      operationId: downloadObjectContent
+      tags: [Objects]
+      security: [{objectTicket: []}]
+      responses:
+        '200':
+          description: Raw object bytes
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    put:
+      operationId: uploadObjectContent
+      tags: [Objects]
+      security: [{objectTicket: []}]
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}}
+      responses:
+        '201': {$ref: '#/components/responses/ObjectRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/storage/objects:
+    get:
+      <<: *controlRead
+      operationId: getObject
+      tags: [Objects]
+      parameters: &objectQuery [{$ref: '#/components/parameters/OwnerQuery'}, {$ref: '#/components/parameters/ScopeQuery'}, {$ref: '#/components/parameters/ObjectKeyQuery'}, {$ref: '#/components/parameters/VersionQuery'}]
+      responses: &objectRead
+        '200': {$ref: '#/components/responses/ObjectRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      operationId: putObject
+      tags: [Objects]
+      security: [{controlPlaneToken: []}]
+      requestBody: {$ref: '#/components/requestBodies/PutObject'}
+      responses:
+        '201': {$ref: '#/components/responses/ObjectRecord'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    delete:
+      <<: *controlDelete
+      operationId: deleteObject
+      tags: [Objects]
+      parameters: *objectQuery
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/storage/objects/list:
+    get:
+      <<: *controlRead
+      operationId: listObjects
+      tags: [Objects]
+      parameters: [{$ref: '#/components/parameters/OwnerQuery'}, {$ref: '#/components/parameters/ScopeQuery'}, {name: prefix, in: query, schema: {type: string}}]
+      responses: &objectCollection
+        '200': {$ref: '#/components/responses/GenericObject'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/storage/objects/stat:
+    get:
+      <<: *controlRead
+      operationId: statObject
+      tags: [Objects]
+      parameters: *objectQuery
+      responses: *objectRead
+  /v1/storage/objects/versions:
+    get:
+      <<: *controlRead
+      operationId: listObjectVersions
+      tags: [Objects]
+      parameters: *objectQuery
+      responses: *objectCollection
+  /v1/storage/tickets:
+    post:
+      operationId: createObjectTicket
+      tags: [Objects]
+      security: [{controlPlaneToken: []}]
+      requestBody: {$ref: '#/components/requestBodies/ObjectTicket'}
+      responses:
+        '201':
+          description: Single-use object ticket issued
+          content: {application/json: {schema: {$ref: '#/components/schemas/ObjectTicket'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/admin/tenants:
+    get:
+      <<: *adminRead
+      operationId: listTenants
+      tags: [Administration]
+      responses:
+        '200':
+          description: All tenants with current workspace usage
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tenants]
+                additionalProperties: false
+                properties: {tenants: {type: array, items: {$ref: '#/components/schemas/Tenant'}}}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+    post:
+      operationId: createTenant
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateTenant'}
+      responses:
+        '201':
+          description: Tenant created
+          content: {application/json: {schema: {$ref: '#/components/schemas/Tenant'}}}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/tenants/{tenant_id}:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    delete:
+      <<: *adminDelete
+      operationId: deleteTenant
+      tags: [Administration]
+      responses:
+        '200': {$ref: '#/components/responses/Deleted'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/tenants/{tenant_id}/status:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    post:
+      operationId: updateTenantStatus
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, enum: [active, suspended]}}}}}
+      responses:
+        '200': {$ref: '#/components/responses/GenericObject'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /v1/admin/tenants/{tenant_id}/keys:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    get:
+      <<: *adminRead
+      operationId: listTenantKeys
+      tags: [Administration]
+    post:
+      operationId: createTenantKey
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateKey'}
+      responses:
+        '201': {$ref: '#/components/responses/IssuedKey'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/admin/tenants/{tenant_id}/owner-tenants:
+    parameters: [{$ref: '#/components/parameters/TenantId'}]
+    get:
+      <<: *adminRead
+      operationId: listTenantOwners
+      tags: [Administration]
+    post:
+      operationId: createTenantOwner
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {type: object, required: [owner_tenant], properties: {owner_tenant: {type: string}}}}}
+      responses:
+        '201': {$ref: '#/components/responses/GenericObject'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/admin/tenants/{tenant_id}/owner-tenants/{owner_tenant_id}:
+    parameters: [{$ref: '#/components/parameters/TenantId'}, {$ref: '#/components/parameters/OwnerTenantId'}]
+    delete:
+      <<: *adminDelete
+      operationId: deleteTenantOwner
+      tags: [Administration]
+  /v1/admin/keys:
+    get:
+      <<: *adminRead
+      operationId: listAdminKeys
+      tags: [Administration]
+    post:
+      operationId: createAdminKey
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateKey'}
+      responses:
+        '201': {$ref: '#/components/responses/IssuedKey'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /v1/admin/keys/{key_id}:
+    parameters: [{$ref: '#/components/parameters/KeyId'}]
+    delete:
+      <<: *adminDelete
+      operationId: deleteAdminKey
+      tags: [Administration]
+  /v1/admin/audit:
+    get:
+      <<: *adminRead
+      operationId: listAuditEvents
+      tags: [Administration]
+      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000}}, {name: cursor, in: query, schema: {type: string}}]
+  /v1/admin/templates:
+    get:
+      <<: *adminRead
+      operationId: listAdminTemplates
+      tags: [Administration]
+    post:
+      operationId: createAdminTemplate
+      tags: [Administration]
+      security: [{adminKey: []}]
+      requestBody: {$ref: '#/components/requestBodies/CreateTemplate'}
+      responses:
+        '201': {$ref: '#/components/responses/GenericObject'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /v1/admin/templates/{template_id}:
+    parameters: [{$ref: '#/components/parameters/TemplateId'}]
+    delete:
+      <<: *adminDelete
+      operationId: deleteAdminTemplate
+      tags: [Administration]
+
+components:
+  securitySchemes:
+    controlPlaneToken: {type: http, scheme: bearer, description: Static Control Plane token or tenant key with ownership checks.}
+    scopedToken: {type: http, scheme: bearer, description: Short-lived token scoped to one workspace or sandbox.}
+    objectTicket: {type: http, scheme: bearer, description: Single-use object-bound upload or download ticket.}
+    adminKey: {type: http, scheme: bearer, description: Administrative key; X-Sandbox-Tenant must not be supplied.}
+    browserSession: {type: apiKey, in: cookie, name: __Host-sandbox_console_session, description: Console session minted by the OIDC callback, plus the matching CSRF cookie/header for mutations.}
+  parameters:
+    WorkspaceId: {name: workspace_id, in: path, required: true, schema: {type: string, pattern: '^ws-[a-f0-9]{12}$'}}
+    SandboxId: {name: sandbox_id, in: path, required: true, schema: {type: string, pattern: '^sb-[a-f0-9]{12}$'}}
+    CheckpointId: {name: checkpoint_id, in: path, required: true, schema: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}}
+    TenantId: {name: tenant_id, in: path, required: true, schema: {type: string}}
+    OwnerTenantId: {name: owner_tenant_id, in: path, required: true, schema: {type: string}}
+    KeyId: {name: key_id, in: path, required: true, schema: {type: string}}
+    TemplateId: {name: template_id, in: path, required: true, schema: {type: string}}
+    PathQuery: {name: path, in: query, schema: {type: string, default: .}}
+    FilePathQuery: {name: path, in: query, required: true, schema: {type: string}}
+    # Derived from the credential and X-Acting-Subject; a tenant-bound credential that sends it is refused with 403.
+    # Only the management plane, which has no tenant of its own, supplies one.
+    OwnerQuery: {name: owner, in: query, required: false, schema: {type: string}}
+    ScopeQuery: {name: scope, in: query, required: true, schema: {type: string, enum: [upload, agent]}}
+    ObjectKeyQuery: {name: key, in: query, required: true, schema: {type: string}}
+    VersionQuery: {name: version_id, in: query, schema: {type: string}}
+  requestBodies:
+    CreateWorkspace:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/CreateWorkspaceRequest'}}}
+    ResolveWorkspace:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/ResolveWorkspaceRequest'}}}
+    CreateSandbox:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/CreateSandboxRequest'}}}
+    WriteFile:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/WriteFileRequest'}}}
+    WriteFileBinary:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/WriteFileBinaryRequest'}}}
+    EditFile:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/EditFileRequest'}}}
+    PutObject:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/PutObjectRequest'}}}
+    ObjectTicket:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/ObjectTicketRequest'}}}
+    WorkspaceImport:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceImportRequest'}}}
+    WorkspaceExport:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceExportRequest'}}}
+    CreateTenant:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/CreateTenantRequest'}}}
+    CreateKey:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [label]
+            properties:
+              label: {type: string, minLength: 1}
+              permissions: {type: array, items: {type: string, enum: [act_as_subjects]}}
+              expires_in_seconds: {type: integer, minimum: 1, maximum: 31536000}
+    CreateTemplate:
+      required: true
+      content: {application/json: {schema: {$ref: '#/components/schemas/Template'}}}
+  responses:
+    Liveness: {description: Process is alive, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, const: alive}}}}}}
+    Readiness: {description: Replica is ready, content: {application/json: {schema: {type: object, required: [status], properties: {status: {type: string, const: ready}}}}}}
+    Health: {description: Dependency health report, content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+    HealthUnavailable: {description: A dependency failed the probe; the body carries a host-redacted error and a diagnosis (the endpoint address goes to the process log), content: {application/json: {schema: {$ref: '#/components/schemas/HealthFailure'}}}}
+    Deleted: {description: Resource deleted, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+    GenericObject: {description: Successful structured response, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+    ObjectRecord: {description: Object metadata and optional content, content: {application/json: {schema: {$ref: '#/components/schemas/ObjectRecord'}}}}
+    IssuedKey: {description: Newly issued key; api_key is returned only once, content: {application/json: {schema: {$ref: '#/components/schemas/IssuedApiKey'}}}}
+    BadRequest: {description: Invalid request, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unauthorized: {description: Missing or invalid credentials, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Forbidden: {description: Authenticated caller is not permitted, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    NotFound: {description: Resource not found, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Conflict: {description: Resource state conflicts with the operation, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    TooManyRequests: {description: Tenant quota exceeded, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    Unavailable: {description: Service or dependency unavailable; retry_after_seconds is present when the object-store queue is full, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+    GatewayTimeout: {description: A downstream call (Runtime, volume agent) did not answer within the Control Plane deadline, content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}}
+  schemas:
+    # Error bodies are {"error": str} everywhere. retry_after_seconds is added
+    # only by the object-store back-pressure path (503). hint accompanies the
+    # 409 returned by file routes when no Runtime serves the workspace.
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error: {type: string}
+        retry_after_seconds: {type: integer, minimum: 0}
+        hint: {type: string}
+    HealthFailure:
+      # /healthz is unauthenticated, so the failing endpoint address is no longer
+      # part of the response: it is topology, not diagnosis, and it is written to
+      # the process log instead. `diagnosis` keeps the actionable classification
+      # (name unresolvable / connection refused / connected but not ready).
+      type: object
+      required: [error, diagnosis]
+      additionalProperties: true
+      properties:
+        error: {type: string, description: Host-redacted failure text}
+        diagnosis: {type: string, description: Classified verdict and next action}
+    Sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    Timestamp: {type: string, format: date-time}
+    Health:
+      type: object
+      required: [status]
+      additionalProperties: true
+      properties:
+        status: {type: string}
+        kubernetes: {type: object, additionalProperties: true}
+        postgresql: {type: object, additionalProperties: true}
+        object_storage: {type: object, additionalProperties: true}
+    Identity:
+      type: object
+      required: [kind, tenant_id, key_id, acting_subject, capabilities]
+      additionalProperties: false
+      properties:
+        kind: {type: string, enum: [admin, tenant, scoped, break-glass]}
+        tenant_id: {type: [string, 'null']}
+        key_id: {type: [string, 'null']}
+        acting_subject: {type: [string, 'null'], pattern: '^[0-9a-f]{32}$'}
+        capabilities: {type: array, items: {type: string}}
+        tenant:
+          type: object
+          required: [name, status, max_workspaces, used_workspaces]
+          additionalProperties: false
+          properties:
+            name: {type: string}
+            status: {type: string, enum: [active, suspended]}
+            max_workspaces: {type: integer, minimum: 0}
+            used_workspaces: {type: integer, minimum: 0}
+    # owner: management plane only, for the same reason as OwnerQuery.
+    CreateWorkspaceRequest:
+      type: object
+      required: [session_id]
+      properties: {session_id: {type: string, minLength: 1}, owner: {type: string}, principal_id: {type: string}, principal_type: {type: string}}
+    ResolveWorkspaceRequest:
+      type: object
+      required: [session_id]
+      properties:
+        session_id: {type: string, minLength: 1, maxLength: 256}
+        principal:
+          type: object
+          properties: {kind: {type: string, minLength: 1, maxLength: 128}, id: {type: string, minLength: 1, maxLength: 128}}
+    WorkspaceResolution:
+      type: object
+      required: [workspace_id, sandbox_id, template]
+      properties:
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        sandbox_id: {type: [string, 'null'], pattern: '^sb-[a-f0-9]{12}$'}
+        template: {type: [string, 'null']}
+    # Workspace timestamps are Unix epoch seconds serialized as strings: they
+    # come from marker files on the volume, not from the database.
+    EpochSeconds: {type: string, pattern: '^[0-9]+$'}
+    # Read-only list view (control plane.workspace_view). The primary key is `id`
+    # here but `workspace_id` in WorkspaceLease; both spellings are what the
+    # Control Plane actually emits and clients must not assume one of them.
+    Workspace:
+      type: object
+      required: [id, status, created_at, last_used_at, runtime_attached, idle_expires_at]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        status: {type: string, const: ready}
+        created_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        last_used_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        runtime_attached: {type: boolean}
+        idle_expires_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        tenant: {type: string, description: Owning tenant; present only in the administrative (global) view}
+    # Response of POST /v1/workspaces. access_token_expires_in is a lifetime in
+    # seconds (ACCESS_TOKEN_TTL_SECONDS), not an absolute timestamp.
+    WorkspaceLease:
+      type: object
+      required: [workspace_id, status, created, file_url, access_token, access_token_expires_in, owner]
+      additionalProperties: false
+      properties:
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        status: {type: string, const: ready}
+        created: {type: boolean, description: True only when this request recreated a missing Workspace directory}
+        file_url: {type: string, pattern: '^/v1/workspaces/ws-[a-f0-9]{12}/files$'}
+        access_token: {type: string, writeOnly: true}
+        access_token_expires_in: {type: integer, minimum: 1}
+        owner: {type: [string, 'null']}
+    CreateSandboxRequest:
+      type: object
+      required: [workspace_id]
+      properties: {workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}, template_id: {type: string}, wait: {type: boolean, default: true}}
+    # Runtime view (control plane.sandbox_view for live Pods; a control-plane record
+    # for pending or released Runtimes, which carries only id/status and, while
+    # pending, workspace_id/template).
+    Sandbox:
+      type: object
+      required: [id, status]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^sb-[a-f0-9]{12}$'}
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        status: {type: string}
+        runtime_class: {type: [string, 'null']}
+        template: {type: string}
+        created_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        expires_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+    # Response of POST /v1/sandboxes: the Sandbox view plus the scoped token.
+    # Flattened rather than allOf so additionalProperties can stay closed.
+    SandboxLease:
+      type: object
+      required: [id, status, mcp_url, access_token, access_token_expires_in]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^sb-[a-f0-9]{12}$'}
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        status: {type: string}
+        runtime_class: {type: [string, 'null']}
+        template: {type: string}
+        created_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        expires_at: {oneOf: [{$ref: '#/components/schemas/EpochSeconds'}, {type: 'null'}]}
+        mcp_url: {type: string, pattern: '^/v1/sandboxes/sb-[a-f0-9]{12}/mcp$'}
+        access_token: {type: string, writeOnly: true}
+        access_token_expires_in: {type: integer, minimum: 1}
+    SandboxReleased:
+      type: object
+      required: [id, released]
+      additionalProperties: false
+      properties: {id: {type: string, pattern: '^sb-[a-f0-9]{12}$'}, released: {type: boolean, const: true}}
+    WorkspaceDeleted:
+      type: object
+      required: [workspace_id, released, data_retained, purged, checkpoints_purged]
+      additionalProperties: false
+      properties:
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        released: {type: boolean, const: true}
+        data_retained: {type: boolean, const: false}
+        purged: {type: boolean, const: true}
+        checkpoints_purged: {type: integer, minimum: 0}
+    MetricAvailability:
+      type: object
+      required: [available, reason]
+      properties:
+        available: {type: boolean}
+        reason: {type: [string, 'null'], enum: [metrics_api_unavailable, metrics_api_forbidden, metrics_api_error, null]}
+    CpuMonitoring:
+      type: object
+      properties:
+        usage_millicores: {type: [integer, 'null'], minimum: 0}
+        request_millicores: {type: integer, minimum: 0}
+        limit_millicores: {type: integer, minimum: 0}
+        allocatable_millicores: {type: [integer, 'null'], minimum: 0}
+        capacity_millicores: {type: [integer, 'null'], minimum: 0}
+    MemoryMonitoring:
+      type: object
+      properties:
+        usage_bytes: {type: [integer, 'null'], minimum: 0}
+        request_bytes: {type: integer, minimum: 0}
+        limit_bytes: {type: integer, minimum: 0}
+        allocatable_bytes: {type: [integer, 'null'], minimum: 0}
+        capacity_bytes: {type: [integer, 'null'], minimum: 0}
+    NodeMonitoring:
+      type: object
+      required: [name, status, roles, unschedulable, cpu, memory, pod_capacity]
+      properties:
+        name: {type: string}
+        status: {type: string, enum: [ready, not_ready]}
+        roles: {type: array, items: {type: string}}
+        unschedulable: {type: boolean}
+        cpu: {$ref: '#/components/schemas/CpuMonitoring'}
+        memory: {$ref: '#/components/schemas/MemoryMonitoring'}
+        pod_capacity: {type: integer, minimum: 0}
+        kubelet_version: {type: [string, 'null']}
+        os_image: {type: [string, 'null']}
+        architecture: {type: [string, 'null']}
+    RuntimeMonitoring:
+      type: object
+      required: [id, status, ready, restarts, cpu, memory]
+      additionalProperties: true
+      properties:
+        id: {type: [string, 'null'], pattern: '^sb-[a-f0-9]{12}$'}
+        workspace_id: {type: [string, 'null']}
+        status: {type: string}
+        node: {type: [string, 'null']}
+        ready: {type: boolean}
+        restarts: {type: integer, minimum: 0}
+        cpu: {$ref: '#/components/schemas/CpuMonitoring'}
+        memory: {$ref: '#/components/schemas/MemoryMonitoring'}
+    MonitoringSnapshot:
+      type: object
+      required: [scope, nodes_visible, metrics, nodes, runtimes]
+      properties:
+        scope: {type: string, enum: [cluster, tenant]}
+        nodes_visible: {type: boolean}
+        metrics:
+          type: object
+          required: [nodes, runtimes]
+          properties:
+            nodes: {oneOf: [{$ref: '#/components/schemas/MetricAvailability'}, {type: 'null'}]}
+            runtimes: {$ref: '#/components/schemas/MetricAvailability'}
+        nodes: {type: array, items: {$ref: '#/components/schemas/NodeMonitoring'}}
+        runtimes: {type: array, items: {$ref: '#/components/schemas/RuntimeMonitoring'}}
+    # Response of POST /v1/sandboxes/{sandbox_id}/token.
+    ScopedToken:
+      type: object
+      required: [id, access_token, access_token_expires_in]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^sb-[a-f0-9]{12}$'}
+        access_token: {type: string, writeOnly: true}
+        access_token_expires_in: {type: integer, minimum: 1}
+    CheckpointId: {type: string, pattern: '^[a-z0-9][a-z0-9-]{0,62}$'}
+    # Created checkpoint (POST .../checkpoints).
+    Checkpoint:
+      type: object
+      required: [checkpoint_id, workspace_id, bucket, key, bytes, sha256, content_type]
+      additionalProperties: false
+      properties:
+        checkpoint_id: {$ref: '#/components/schemas/CheckpointId'}
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        bucket: {type: string}
+        key: {type: string}
+        bytes: {type: integer, minimum: 0}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+        content_type: {type: string, const: application/gzip}
+    # Listing entry: object-store metadata only (no sha256 without a stat).
+    CheckpointListItem:
+      type: object
+      required: [checkpoint_id, key, bytes, last_modified]
+      additionalProperties: false
+      properties:
+        checkpoint_id: {$ref: '#/components/schemas/CheckpointId'}
+        key: {type: string}
+        bytes: {type: integer, minimum: 0}
+        last_modified: {type: [string, 'null']}
+    CheckpointList:
+      type: object
+      required: [workspace_id, checkpoints]
+      additionalProperties: false
+      properties:
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        checkpoints: {type: array, items: {$ref: '#/components/schemas/CheckpointListItem'}}
+    # Restore merges the Runtime file-service restore report, so it is open.
+    CheckpointRestore:
+      type: object
+      required: [checkpoint_id, workspace_id, bucket, key, sha256]
+      additionalProperties: true
+      properties:
+        checkpoint_id: {$ref: '#/components/schemas/CheckpointId'}
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        bucket: {type: string}
+        key: {type: string}
+        sha256: {$ref: '#/components/schemas/Sha256'}
+    CheckpointDeleted:
+      type: object
+      required: [workspace_id, checkpoint_id, deleted, history_retained]
+      additionalProperties: false
+      properties:
+        workspace_id: {type: string, pattern: '^ws-[a-f0-9]{12}$'}
+        checkpoint_id: {$ref: '#/components/schemas/CheckpointId'}
+        deleted: {type: boolean, const: true}
+        history_retained: {type: boolean, const: false}
+    WriteFileRequest: {type: object, required: [path, content], properties: {path: {type: string}, content: {type: string}}}
+    WriteFileBinaryRequest: {type: object, required: [path, content_base64], properties: {path: {type: string}, content_base64: {type: string, format: byte}, sha256: {$ref: '#/components/schemas/Sha256'}}}
+    EditFileRequest: {type: object, required: [path, old, new], properties: {path: {type: string}, old: {type: string}, new: {type: string}}}
+    # owner is derived from the credential and X-Acting-Subject on requests, and echoed on responses; see OwnerQuery.
+    ObjectLocator: {type: object, required: [scope, key], properties: {owner: {type: string}, scope: {type: string, enum: [upload, agent]}, key: {type: string}, version_id: {type: string}}}
+    PutObjectRequest:
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, properties: {content_base64: {type: string, format: byte}, sha256: {$ref: '#/components/schemas/Sha256'}}}]
+    ObjectRecord:
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, additionalProperties: true, properties: {bucket: {type: string}, bytes: {type: integer, minimum: 0}, sha256: {$ref: '#/components/schemas/Sha256'}, content_base64: {type: string, format: byte}, created_at: {$ref: '#/components/schemas/Timestamp'}}}]
+    ObjectTicketRequest:
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [operation], properties: {operation: {type: string, enum: [upload, download]}, content_type: {type: string}, sha256: {$ref: '#/components/schemas/Sha256'}, expires_in: {type: integer, minimum: 1}, max_bytes: {type: integer, minimum: 1}}}]
+    # Response of POST /v1/storage/tickets. expires_in is seconds from issue.
+    ObjectTicket:
+      type: object
+      required: [operation, method, url, access_token, expires_in, max_bytes, object]
+      additionalProperties: false
+      properties:
+        operation: {type: string, enum: [upload, download]}
+        method: {type: string, enum: [GET, PUT]}
+        url: {type: string, const: /v1/storage/content}
+        access_token: {type: string, writeOnly: true}
+        expires_in: {type: integer, minimum: 1}
+        max_bytes: {type: integer, minimum: 1}
+        object:
+          type: object
+          required: [bucket, key]
+          additionalProperties: false
+          properties: {bucket: {type: string}, key: {type: string}}
+    WorkspaceImportRequest:
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [destination], properties: {destination: {type: string, pattern: '^data/uploads/'}}}]
+    WorkspaceExportRequest:
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [workspace_path], properties: {workspace_path: {type: string, pattern: '^artifacts/'}}}]
+    CreateTenantRequest: {type: object, required: [id], properties: {id: {type: string}, display_name: {type: string}, max_workspaces: {type: integer, minimum: 0}, max_runtimes: {type: integer, minimum: 0}}}
+    Tenant:
+      type: object
+      required: [id, display_name, status, max_workspaces, max_runtimes]
+      additionalProperties: false
+      properties:
+        id: {type: string}
+        display_name: {type: string}
+        status: {type: string, enum: [active, suspended]}
+        max_workspaces: {type: integer, minimum: 0}
+        max_runtimes: {type: integer, minimum: 0}
+        workspaces_in_use: {type: integer, minimum: 0, description: Present in the list view only}
+    IssuedApiKey:
+      type: object
+      required: [id, tenant_id, label, api_key, permissions, expires_at, note]
+      additionalProperties: false
+      properties:
+        id: {type: string, pattern: '^[a-f0-9]{16}$'}
+        tenant_id: {type: [string, 'null']}
+        label: {type: string}
+        api_key: {type: string, writeOnly: true}
+        permissions: {type: array, items: {type: string, enum: [act_as_subjects]}}
+        expires_at: {type: [integer, 'null'], description: Unix seconds, or null for a key that never expires}
+        note: {type: string}
+    Template: {type: object, required: [tenant_id, template_id, image], additionalProperties: true, properties: {tenant_id: {type: string}, template_id: {type: string}, image: {type: string}}}
+    JsonRpcMessage: {type: object, required: [jsonrpc], additionalProperties: true, properties: {jsonrpc: {type: string, const: '2.0'}, id: {type: [string, integer, 'null']}, method: {type: string}, params: {type: [object, array, 'null']}, result: {}, error: {type: object, additionalProperties: true}}}

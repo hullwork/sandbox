@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-control-plane
+  namespace: sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - name: SANDBOX_STORE_BACKEND
+              value: sqlite
+            - name: SANDBOX_STORE_PATH
+              value: /tmp/sandbox-control-plane.db
+            - name: SANDBOX_DB_HOST
+              $patch: delete
+            - name: SANDBOX_DB_NAME
+              $patch: delete
+            - name: SANDBOX_DB_USER
+              $patch: delete
+            - name: SANDBOX_DB_PASSWORD_FILE
+              $patch: delete
+          volumeMounts:
+            - name: db-password
+              mountPath: /var/run/sandbox-db
+              $patch: delete
+      volumes:
+        - name: db-password
+          $patch: delete

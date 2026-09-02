@@ -1,0 +1,93 @@
+# Example: Control Plane backed by an external MySQL database and an external
+# S3-compatible object store. Every host, endpoint, and bucket below is a
+# placeholder; replace them before applying.
+#
+# Status: experimental. The default sandbox-control-plane image does not ship the
+# pymysql driver (control_plane/requirements.lock does not include it), so
+# SANDBOX_STORE_BACKEND=mysql fails at startup with "MySQL driver is
+# unavailable" until you build an image that adds it. PostgreSQL remains the
+# supported production backend (see k8s/control-plane.yaml).
+#
+# Pre-create both Secrets in sandbox-system before applying this overlay:
+#
+#   kubectl -n sandbox-system create secret generic sandbox-mysql-auth \
+#     --from-literal=database=sandbox \
+#     --from-literal=username=sandbox \
+#     --from-literal=password='<mysql-password>'
+#   kubectl -n sandbox-system create secret generic sandbox-oss-credentials \
+#     --from-literal=access-key='<object-store-access-key>' \
+#     --from-literal=secret-key='<object-store-secret-key>'
+#
+# Buckets are not created by Control Plane; create the three buckets on the provider
+# first. The base k8s/control-plane.yaml still expects sandbox-api-credentials and
+# sandbox-volume-auth; see docs/DEPLOYMENT.md for the full list.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: object-store-config
+  namespace: sandbox-system
+data:
+  endpoint: https://s3.example.com
+  upload-bucket: your-oss-bucket
+  agent-bucket: your-oss-bucket
+  workspace-bucket: your-oss-bucket
+  # Empty: most providers have no unauthenticated readiness endpoint.
+  health-path: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-control-plane
+  namespace: sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: control-plane
+          env:
+            - name: SANDBOX_STORE_BACKEND
+              value: mysql
+            - name: SANDBOX_DB_HOST
+              value: your-mysql-host.example.com
+            - name: SANDBOX_DB_PORT
+              value: "3306"
+            - name: SANDBOX_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-mysql-auth
+                  key: database
+            - name: SANDBOX_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-mysql-auth
+                  key: username
+            - name: SANDBOX_DB_PASSWORD_FILE
+              value: /var/run/sandbox-db/password
+            # Providers that only accept virtual-host addressing and V2
+            # signatures need both settings; drop them for MinIO or AWS S3.
+            - name: OBJECT_STORE_SIGNATURE_VERSION
+              value: S3v2
+            - name: OBJECT_STORE_ADDRESSING_STYLE
+              value: virtual
+            - name: OBJECT_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-oss-credentials
+                  key: access-key
+            - name: OBJECT_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-oss-credentials
+                  key: secret-key
+          volumeMounts:
+            - name: db-password
+              mountPath: /var/run/sandbox-db
+              readOnly: true
+      volumes:
+        - name: db-password
+          secret:
+            secretName: sandbox-mysql-auth
+            items:
+              - key: password
+                path: password
+            defaultMode: 0440

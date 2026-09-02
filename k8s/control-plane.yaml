@@ -1,0 +1,281 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-control-plane
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: sandbox-control-plane
+    app.kubernetes.io/managed-by: sandbox-controller
+spec:
+  replicas: 1
+ # 🔴 Recreate, not RollingUpdate: a single replica is a constraint, not a default.
+ # Runtime admission (_RUNTIME_ADMISSION_LOCK, _CREATE_SLOTS), the mc semaphore,
+ # the in-memory runtime states of the no-database mode and the reaper all live
+ # inside one process. A rolling update keeps old and new Pods serving side by
+ # side for up to the 210s grace period: MAX_RUNTIMES can be exceeded twice
+ # over, a 202 polled on the other replica answers 404, two reapers race.
+ # Recreate stops the old Pod first; the control-plane is down for the restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sandbox-control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sandbox-control-plane
+        app.kubernetes.io/managed-by: sandbox-controller
+    spec:
+ # Turn off the budget cap for orchestration. After Control Plane receives SIGTERM, it first asks /readyz to report 503 (K8s accordingly
+ # Extract Endpoints), wait for SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS, then stop listening and wait for requests in transit
+ # and background runtime provisioning to finish, and finally wait for the reaper to complete its current round.
+ # 🔴 This value must be greater than the total budget of that arrangement (SHUTDOWN_BUDGET_SECONDS of core.py
+ # = 5 picking traffic + 120 waiting in transit + 60 waiting reaper = 185s), otherwise SIGKILL will be
+ # Arriving midway, graceful shutdown becomes a decoration - and the failure method is "occasionally dropping a few requests/occasionally more
+ # Output a line "pending", which is difficult to attribute here.
+ # It used to be 30s: that does not even cover one synchronous provisioning (wait_for_pod 90s + health check 20s);
+ # cutting in between admit and activate leaves "a pending row in the store + a running Pod in the cluster
+ # Pod + client cannot get sandbox_id", it will take 10 minutes of cleaning to heal itself.
+ # ⚠️ This 185s is the **upper limit, not the time consuming**: when there are no requests in transit, it only takes a little over 5s to complete the arrangement.
+ # K8s will not wait for the grace period to expire - the process will exit by itself and the Pod will disappear immediately.
+      terminationGracePeriodSeconds: 210
+      serviceAccountName: sandbox-control-plane
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-plane
+          image: sandbox-control-plane:0.7.0
+          imagePullPolicy: Never
+          envFrom:
+            - configMapRef:
+ # Capacity/lifecycle knob (configMapGenerator of kustomization.yaml)
+                name: sandbox-tuning
+            - configMapRef:
+                name: sandbox-observability
+                optional: true
+          env:
+            - name: SANDBOX_CONTROL_PLANE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-api-credentials
+                  key: control-plane-token
+            - name: SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-api-credentials
+                  key: signing-key
+ # Separate from SIGNING_KEY on purpose: this one derives Workspace IDs and must
+ # never rotate, SIGNING_KEY signs short-lived tokens and may. No fallback.
+            - name: WORKSPACE_ID_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-api-credentials
+                  key: workspace-id-key
+            - name: SANDBOX_RUNTIME_IMAGE
+              value: sandbox-runtime:0.5.0
+            - name: SANDBOX_RUNTIME_DRIVER
+              value: gvisor
+ # Clusters that do not have runsc on the node must be explicitly empty (value: ""), otherwise Runtime Pod
+ # Will get stuck on RunContainerError after successful scheduling. Leave empty to abandon gVisor kernel isolation.
+            - name: SANDBOX_RUNTIME_CLASS
+              value: gvisor
+ # Runtime Pod (untrusted code) is nailed to sandbox.convee.io/node-role=runtime
+ # Labeled worker node, separated from the control-plane/Control Plane. The label of the local stack is placed in
+ # on the designated runtime node; if unset, portable single-node behavior is preserved.
+            - name: SANDBOX_RUNTIME_NODE_SELECTOR
+              value: sandbox.convee.io/node-role=runtime
+            - name: SANDBOX_RUNTIME_TOLERATIONS
+              value: '[{"key":"sandbox.convee.io/node-role","operator":"Equal","value":"runtime","effect":"NoSchedule"}]'
+ # Prefix whitelist of template images, separated by commas. **Not configured = Template management is closed as a whole**
+ # (POST/DELETE /v1/admin/templates returns 409, /v1/whoami’s
+ # templates:write) does not appear in capabilities, this is a deliberate fail closed:
+ # Template = Mirror = Run any code in the cluster, and the default release is equivalent to handing over the Pod creation rights.
+ # This file does not give default values because local deployment side-loads images.
+ # The local image has no registry prefix; production operators should configure one.
+ # Fill in the registry cluster yourself, for example:
+            #   value: ghcr.io/convee/,registry.local/sandbox/
+ # The prefix is a literal prefix and does not imply directory boundaries: if you want directory semantics, just write the trailing `/` yourself.
+ # The built-in templates (SANDBOX_TEMPLATES) are not bound by it - both belong to the deployment configuration.
+            # - name: SANDBOX_IMAGE_REGISTRIES
+            #   value: ""
+            - name: WORKSPACE_PVC
+              value: sandbox-workspaces
+            - name: SANDBOX_WORKSPACE_STORAGE_MODE
+              value: shared
+            - name: SANDBOX_TTL_SECONDS
+              value: "1800"
+            - name: WORKSPACE_IDLE_TTL_SECONDS
+              value: "21600"
+            - name: CHECKPOINT_RETENTION_SECONDS
+              value: "2592000"
+            - name: CHECKPOINT_GC_INTERVAL_SECONDS
+              value: "3600"
+ # Keep runtime capacity aligned with the ResourceQuota in workload-quota.yaml.
+            - name: ACCESS_TOKEN_TTL_SECONDS
+              value: "900"
+            - name: OBJECT_TICKET_TTL_SECONDS
+              value: "900"
+            - name: MAX_STREAM_OBJECT_BYTES
+              value: "67108864"
+ # Endpoint and bucket names come from object-store-config; credentials come
+ # from object-store-credentials.
+            - name: OBJECT_STORE_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: object-store-config
+                  key: endpoint
+            - name: OBJECT_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-credentials
+                  key: access-key
+            - name: OBJECT_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-store-credentials
+                  key: secret-key
+            - name: OBJECT_STORE_UPLOAD_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: object-store-config
+                  key: upload-bucket
+            - name: OBJECT_STORE_AGENT_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: object-store-config
+                  key: agent-bucket
+            - name: OBJECT_STORE_WORKSPACE_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: object-store-config
+                  key: workspace-bucket
+            - name: OBJECT_STORE_HEALTH_PATH
+              valueFrom:
+                configMapKeyRef:
+                  name: object-store-config
+                  key: health-path
+ # The address and credentials of the volume role. Without them, the Control Plane can still start, but the Runtime
+ # Reading in absence and creation/enumeration/purge of Workspace will report 409 truthfully ——
+ # Do not downgrade silently.
+ # Control plane storage. Not suitable = single-tenant mode, the behavior is the same as before the introduction of multi-tenancy.
+ # Production operators provide this PostgreSQL Service and Secret. Local
+ # development overlays remove these settings and use SQLite.
+            - name: SANDBOX_STORE_BACKEND
+              value: postgresql
+            - name: SANDBOX_DB_HOST
+              value: sandbox-postgres
+            - name: SANDBOX_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-postgres-auth
+                  key: database
+            - name: SANDBOX_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-postgres-auth
+                  key: username
+            - name: SANDBOX_DB_PASSWORD_FILE
+              value: /var/run/sandbox-db/password
+            - name: VOLUME_AGENT_URL
+              value: http://sandbox-volume.sandbox-workloads.svc.cluster.local:8080
+            - name: VOLUME_AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sandbox-volume-auth
+                  key: token
+            - name: SANDBOX_MAX_CONCURRENT_MC
+              value: "1"
+            - name: SANDBOX_MC_GOMAXPROCS
+              value: "2"
+            - name: SANDBOX_MC_GOMEMLIMIT
+              value: 256MiB
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+ # 🔴 To be ready type /readyz instead of /healthz. /healthz is **relying on physical examination**: it except
+ # K8s API also needs to explore the object storage, if anything fails, it will get 503. And this Deployment is
+ # replicas: 1 - The consequence of connecting it to readinessProbe is: cross-cluster storage
+ # blip, the only Endpoint is removed, and the agent host loses its connection.
+ # sandbox-control-plane.sandbox-system.svc:8080 cannot be dialed, so **sandboxes that are already running
+ # can no longer exec, list, or release**, although these three paths are the same
+ # bytes without touching the object store. A downstream local fault is amplified by the probe into the entire control-plane
+ # Disappears, and only Pod 0/1 is seen on site, which does not point to storage.
+ # The criterion for /readyz is only "Whether removing the traffic of this copy can improve the situation" - under single copy
+ # Only turn off the arrangement calculation, nothing else will be entered. When storage really fails, those that really depend on it
+ # Route yourself back to 503 + retry_after_seconds (ObjectStoreUnavailable),
+ # Do not rely on its business-as-usual service.
+ # Don't change /healthz to startupProbe: that will cause storage jitter
+ # Control Plane cannot be restarted/rescheduled, and the same amplification effect will recur at another time. Deployment period
+ # Wiring verification belongs in the deployment's release gate, where red is reported
+ # The price is "failure to pass a certain step", not "service interruption".
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 2
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+ # Mount the database password from a Secret instead of exposing it in env.
+            - name: db-password
+              mountPath: /var/run/sandbox-db
+              readOnly: true
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 96Mi
+        - name: db-password
+          secret:
+            secretName: sandbox-postgres-auth
+            items:
+              - key: password
+                path: password
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sandbox-control-plane
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: sandbox-control-plane
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: sandbox-control-plane
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      nodePort: 30080

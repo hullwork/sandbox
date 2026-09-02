@@ -1,0 +1,403 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  release-context:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify public annotated main tag and project version
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          RELEASE_TAG: '${{ github.ref_name }}'
+        run: |
+          test "$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)" = public || {
+            echo 'release tags are accepted only after the repository is public' >&2
+            exit 1
+          }
+          test "$(git cat-file -t "refs/tags/$RELEASE_TAG")" = tag || {
+            echo 'release tag must be annotated' >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          tag_commit="$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")"
+          git merge-base --is-ancestor "$tag_commit" origin/main || {
+            echo 'release tag commit must be reachable from origin/main' >&2
+            exit 1
+          }
+          python - <<'PY'
+          import os, pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          assert os.environ['RELEASE_TAG'] == f'v{version}', (os.environ['RELEASE_TAG'], version)
+          PY
+
+  python-artifacts:
+    needs: release-context
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: {python-version: '3.14'}
+      - name: Build and smoke-test Python distributions
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+          python -m venv /tmp/sandbox-wheel-smoke
+          /tmp/sandbox-wheel-smoke/bin/python -m pip install dist/*.whl
+          /tmp/sandbox-wheel-smoke/bin/sandbox --help >/dev/null
+          /tmp/sandbox-wheel-smoke/bin/sandbox-mcp --help >/dev/null
+          /tmp/sandbox-wheel-smoke/bin/sandboxctl --help >/dev/null
+      - name: Guard the wheel's installed top-level surface
+        run: python scripts/check-wheel-surface.py dist/*.whl
+      - name: Check the distribution metadata PyPI will render
+        # PyPI rejects an upload whose long description does not render, and it
+        # rejects it after the version number is already spent. Ask before the
+        # tag is burned rather than after.
+        run: |
+          set -euo pipefail
+          python -m pip install twine
+          python -m twine check --strict dist/*.whl dist/*.tar.gz
+      - name: Generate dependency inventory
+        run: |
+          python -m venv /tmp/sandbox-license-inventory
+          /tmp/sandbox-license-inventory/bin/python -m pip install .
+          /tmp/sandbox-license-inventory/bin/python scripts/generate-license-inventory.py \
+            --json dist/licenses.json --markdown dist/licenses.md
+      - name: Scan source dependencies
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+          output: dist/source-security.txt
+      - name: Generate source SBOM
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: cyclonedx
+          output: dist/source.cdx.json
+      - name: Attest Python build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+      - name: Attest source SBOM to Python distributions
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.whl
+            dist/*.tar.gz
+          sbom-path: dist/source.cdx.json
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign Python distributions with keyless Sigstore
+        run: |
+          for artifact in dist/*.whl dist/*.tar.gz; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-release
+          path: dist/
+          if-no-files-found: error
+
+  images:
+    needs: release-context
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {name: runtime, context: ., dockerfile: runtime/Dockerfile}
+          - {name: file-service, context: ., dockerfile: file-service/Dockerfile}
+          - {name: control-plane, context: ., dockerfile: control_plane/Dockerfile}
+          - {name: console, context: console, dockerfile: console/Dockerfile}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@ce360397dd3f832beb865e1373c09c0e9f86d70a # v4.0.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
+        with:
+          images: ghcr.io/${{ github.repository }}-${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha
+      - id: image
+        name: Resolve official and staging image names
+        env: {METADATA_JSON: '${{ steps.meta.outputs.json }}'}
+        run: |
+          image_tag="$(jq -r '.tags[0]' <<<"$METADATA_JSON")"
+          image_name="${image_tag%:*}"
+          echo "name=${image_name}" >>"$GITHUB_OUTPUT"
+          echo "staging=${image_name}:scan-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >>"$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          # This run-scoped tag is never referenced by release metadata. The
+          # official semver/SHA tags are created only after the exact digest
+          # below passes the vulnerability and secret gate.
+          tags: ${{ steps.image.outputs.staging }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+      - name: Scan staged image before promotion
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.staging }}@${{ steps.build.outputs.digest }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+          output: image-${{ matrix.name }}-security.txt
+      - name: Generate image SBOM
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.staging }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx
+          output: image-${{ matrix.name }}.cdx.json
+      - name: Promote scanned digest to official tags
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_NAME: ${{ steps.image.outputs.name }}
+          METADATA_JSON: '${{ steps.meta.outputs.json }}'
+        run: |
+          mapfile -t official_tags < <(jq -r '.tags[]' <<<"$METADATA_JSON")
+          ((${#official_tags[@]} > 0))
+          tag_args=()
+          for tag in "${official_tags[@]}"; do
+            tag_args+=(--tag "$tag")
+          done
+          docker buildx imagetools create "${tag_args[@]}" "$IMAGE_NAME@$DIGEST"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign promoted image digest with keyless Sigstore
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "$IMAGE@$DIGEST"
+      - name: Record deployable image identity
+        env:
+          COMPONENT: ${{ matrix.name }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          case "$COMPONENT" in
+            runtime) value_path=images.runtime ;;
+            file-service) value_path=images.fileService ;;
+            control-plane) value_path=images.controlPlane ;;
+            console) value_path=images.console ;;
+            *) exit 1 ;;
+          esac
+          jq -n --arg component "$COMPONENT" --arg valuePath "$value_path" \
+            --arg repository "$IMAGE" --arg digest "$DIGEST" \
+            '{component:$component,valuePath:$valuePath,repository:$repository,digest:$digest,immutableRef:($repository+"@"+$digest)}' \
+            >"image-${COMPONENT}.json"
+      - name: Attest image provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Attest image SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: image-${{ matrix.name }}.cdx.json
+          push-to-registry: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-${{ matrix.name }}-evidence
+          path: |
+            image-${{ matrix.name }}.cdx.json
+            image-${{ matrix.name }}.json
+            image-${{ matrix.name }}-security.txt
+          if-no-files-found: error
+
+  helm-chart:
+    needs: [release-context, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-*-evidence
+          path: chart-dist
+          merge-multiple: true
+      - name: Lint, render, and package chart
+        run: |
+          helm lint charts/sandbox
+          helm template sandbox charts/sandbox >sandbox-rendered.yaml
+          helm package charts/sandbox --destination chart-dist
+          cp charts/sandbox/package.yaml chart-dist/sandbox-package.yaml
+      - name: Authenticate to GitHub Container Registry
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Publish immutable OCI chart and package metadata
+        env: {RELEASE_TAG: '${{ github.ref_name }}'}
+        run: |
+          push_output="$(helm push chart-dist/sandbox-*.tgz "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts")"
+          printf '%s\n' "$push_output"
+          chart_digest="$(printf '%s\n' "$push_output" | sed -n 's/^Digest: //p' | tail -1)"
+          test -n "$chart_digest"
+          chart_file="$(printf '%s\n' chart-dist/sandbox-*.tgz)"
+          chart_checksum="sha256:$(sha256sum "$chart_file" | awk '{print $1}')"
+          descriptor_checksum="sha256:$(sha256sum chart-dist/sandbox-package.yaml | awk '{print $1}')"
+          jq -s '[.[] | select(.component?)]' chart-dist/image-*.json >chart-dist/images.json
+          jq -n \
+            --arg name sandbox \
+            --arg version "${RELEASE_TAG#v}" \
+            --arg url "oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/sandbox" \
+            --arg digest "$chart_digest" \
+            --arg chartFile "${chart_file#chart-dist/}" \
+            --arg chartChecksum "$chart_checksum" \
+            --arg descriptorChecksum "$descriptor_checksum" \
+            --slurpfile images chart-dist/images.json \
+            '{schemaVersion:1,name:$name,version:$version,package:{type:"helm-oci",url:$url,digest:$digest,immutableRef:($url+"@"+$digest)},artifacts:{chart:{filename:$chartFile,sha256:$chartChecksum},packageDescriptor:{filename:"sandbox-package.yaml",sha256:$descriptorChecksum}},runtimeImages:{publishedByThisWorkflow:true,images:$images[0]}}' \
+            >chart-dist/package-metadata.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: helm-chart
+          path: |
+            chart-dist/*.tgz
+            sandbox-rendered.yaml
+            chart-dist/package-metadata.json
+          if-no-files-found: error
+
+  github-release:
+    needs: [python-artifacts, images, helm-chart]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v5.1.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with: {python-version: '3.14'}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: release
+          merge-multiple: true
+      - name: Build digest-pinned deployment and complete license inventory
+        run: |
+          python -m pip install 'PyYAML>=6.0,<7'
+          kubectl kustomize k8s >release/base-manifest.yaml
+          python scripts/prepare_release_assets.py \
+            --release-dir release \
+            --manifest-input release/base-manifest.yaml \
+            --manifest-output "release/sandbox-${GITHUB_REF_NAME}.yaml"
+          rm release/base-manifest.yaml
+          checksum_file="$(mktemp)"
+          (cd release && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+            | sort -z | xargs -0 sha256sum >"$checksum_file")
+          mv "$checksum_file" release/SHA256SUMS
+      - name: Publish immutable-tag release assets
+        env: {GH_TOKEN: '${{ github.token }}'}
+        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes --draft
+
+  pypi-publish:
+    # Last in the workflow, and behind a required approval, because it is the
+    # only step here that cannot be taken back: PyPI never lets a version number
+    # be reused, not even after the file is deleted. By the time this job asks
+    # for that approval the reviewer can see everything they need to answer -
+    # the draft GitHub Release, the scanned and promoted GHCR digests, the
+    # SBOMs, and the vulnerability reports all already exist.
+    needs: [python-artifacts, github-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/sandbox-platform
+    permissions:
+      # Trusted Publishing, not an API token. A long-lived token in repository
+      # secrets is a standing grant to upload under this project name that
+      # survives contributors, forks of the workflow, and this repository going
+      # public; the OIDC identity is minted per run and only for a run that
+      # matches the publisher PyPI has on file. `id-token: write` is scoped to
+      # this job alone so no other job in the release can mint one.
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-release
+          path: python-release
+      - name: Select the distributions this run built, scanned, and attested
+        # Upload the artifact bytes rather than rebuilding: what reaches PyPI is
+        # then the same file the SBOM, the Sigstore bundle, and the GitHub
+        # attestation are about. The artifact also holds licence inventories,
+        # scan reports and those bundles, and PyPI refuses a directory holding
+        # anything that is not a distribution - so name the two files instead of
+        # globbing. Naming them also means an artifact carrying some other
+        # version fails here rather than being published under this tag.
+        env: {RELEASE_TAG: '${{ github.ref_name }}'}
+        run: |
+          set -euo pipefail
+          mkdir dist
+          mv "python-release/sandbox_platform-${RELEASE_TAG#v}-py3-none-any.whl" dist/
+          mv "python-release/sandbox_platform-${RELEASE_TAG#v}.tar.gz" dist/
+          selected=(dist/*)
+          test "${#selected[@]}" -eq 2
+          python3 scripts/check-wheel-surface.py dist/*.whl
+      - name: Publish to PyPI through Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist
+          # Explicit because it is security-relevant: the action signs a PEP 740
+          # attestation with this job's OIDC identity and PyPI displays it.
+          attestations: true

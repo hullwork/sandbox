@@ -1,0 +1,16 @@
+.git
+.github
+.planning
+**/__pycache__
+**/*.py[cod]
+**/node_modules
+console/dist
+dist
+build
+.env
+.env.*
+.sandbox*/
+*.kubeconfig
+kubeconfig
+**/kubeconfig
+*.log

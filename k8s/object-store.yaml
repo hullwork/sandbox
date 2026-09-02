@@ -1,0 +1,19 @@
+# S3-compatible object storage contract. Operators may replace the endpoint and
+# bucket names without changing Control Plane manifests. Bucket and identity lifecycle
+# remain the responsibility of the selected object-store implementation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: object-store-config
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: object-store-config
+    app.kubernetes.io/managed-by: sandbox-controller
+data:
+  endpoint: http://rook-ceph-rgw-object-store.rook-ceph.svc.cluster.local:80
+  upload-bucket: user-uploads
+  agent-bucket: agent-data
+  workspace-bucket: sandbox-workspaces
+  # RGW has no anonymous provider-specific readiness path. Ceph health is owned
+  # by Rook; Control Plane validates S3 operations on demand.
+  health-path: ""

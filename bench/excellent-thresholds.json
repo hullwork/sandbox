@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "profile": "local-gvisor-excellent-v1",
+  "global": {
+    "minimumRecordedIterations": 100,
+    "minimumOperationSuccessRate": 0.999
+  },
+  "metrics": {
+    "health": {"p95Seconds": 0.1, "p99Seconds": 0.25, "minimumSuccessRate": 0.999},
+    "workspace_create": {"p95Seconds": 0.1, "p99Seconds": 0.25, "minimumSuccessRate": 0.999},
+    "runtime_cold_start": {"p50Seconds": 5.0, "p95Seconds": 15.0, "p99Seconds": 30.0, "minimumSuccessRate": 0.99},
+    "warm_exec": {"p95Seconds": 0.3, "p99Seconds": 0.75, "minimumSuccessRate": 0.999},
+    "file_write_1k": {"p95Seconds": 0.5, "p99Seconds": 1.0, "minimumSuccessRate": 0.999},
+    "file_read_1k": {"p95Seconds": 0.5, "p99Seconds": 1.0, "minimumSuccessRate": 0.999}
+  }
+}

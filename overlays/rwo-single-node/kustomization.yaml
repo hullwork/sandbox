@@ -1,0 +1,12 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Single-node profile for clusters without RWX storage. It trades volume-agent
+# availability for portability by using one RWO claim and one pinned replica.
+resources:
+  - ../../k8s
+patches:
+  - path: workspace-storage.yaml
+  - path: volume-agent-single.yaml
+  - path: workspace-gc-pinned.yaml
+  - path: workspace-init-pinned.yaml

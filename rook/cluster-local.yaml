@@ -1,0 +1,70 @@
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: rook-ceph
+  namespace: rook-ceph
+spec:
+  cephVersion:
+    image: quay.io/ceph/ceph:v20.2.4
+    allowUnsupported: false
+  dataDirHostPath: /var/lib/rook
+  mon:
+    count: 1
+    allowMultiplePerNode: true
+  mgr:
+    count: 1
+    allowMultiplePerNode: true
+  dashboard:
+    enabled: false
+  crashCollector:
+    disable: true
+  storage:
+    useAllNodes: true
+    useAllDevices: false
+    # Rook v1.20 deliberately excludes loop devices from deviceFilter matches.
+    # The local preparation DaemonSet deterministically owns this exact device.
+    devices:
+      - name: /dev/loop0
+  disruptionManagement:
+    managePodBudgets: false
+  priorityClassNames:
+    all: system-cluster-critical
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStore
+metadata:
+  name: object-store
+  namespace: rook-ceph
+spec:
+  metadataPool:
+    failureDomain: host
+    replicated:
+      size: 1
+      requireSafeReplicaSize: false
+  dataPool:
+    failureDomain: host
+    replicated:
+      size: 1
+      requireSafeReplicaSize: false
+  preservePoolsOnDelete: true
+  gateway:
+    port: 80
+    instances: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+---
+apiVersion: ceph.rook.io/v1
+kind: CephObjectStoreUser
+metadata:
+  name: sandbox-runtime
+  namespace: rook-ceph
+spec:
+  store: object-store
+  displayName: Sandbox Runtime
+  quotas:
+    maxBuckets: 3

@@ -1,0 +1,18 @@
+# Shared PVC in RWO form (now exists only in rwo-single-node):
+# Per-ws PVC direct mount requires RWX provider, RWO environment returns to the old topology of shared volumes + subPath.
+# 🔴 accessModes/storageClassName is immutable: the migrated cluster cannot be applied back to this layer.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sandbox-workspaces
+  namespace: sandbox-workloads
+  labels:
+    app.kubernetes.io/name: sandbox-workspaces
+    app.kubernetes.io/managed-by: sandbox-controller
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: standard
+  resources:
+    requests:
+      storage: 2Gi
