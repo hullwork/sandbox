@@ -97,6 +97,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.request_started = time.monotonic()
         self.response_status = 500
         self.request_span = None
+        # 🔴 Identity is per request, never per connection. Every field the
+        # authentication path writes is reset here, so that under keep-alive
+        # (one handler instance, several requests) the second request cannot
+        # inherit the first one's tenant: require_control_plane_auth short-
+        # circuits on `authenticated`, and a reverse proxy that pools upstream
+        # connections would otherwise hand tenant A's identity to tenant B.
+        # Today protocol_version is HTTP/1.0, which closes after each
+        # response; this must not depend on that staying so.
+        self.authenticated = False
+        self.tenant_id = None
+        self.api_key = None
+        self.session_claims = None
+        self.acting_subject = None
+        self.scoped_claims = None
+        self.scoped_credential = False
+        self.object_owner = None
         try:
             super().handle_one_request()
         finally:
