@@ -95,8 +95,8 @@ Versioning after its first public release.
   overwrote them would reverse it invisibly; Control Plane picks flags only for a trace
   it starts itself. A malformed header is treated as absent and never fails the
   request: an observability aid must not decide availability. Object-storage
-  traffic leaves through the `mc` client, which has no header injection point,
-  so that hop is untraced and says so in the README.
+  traffic leaves through `boto3`, which does not yet propagate `traceparent`,
+  so that hop is not traced yet and the README says so.
 
 ### Removed
 

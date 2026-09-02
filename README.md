@@ -250,8 +250,8 @@ there is one, so it joins a trace an upstream gateway already started rather tha
 beginning a parallel one; see the [HTTP and SDK contract](docs/API.md#request-tracing).
 
 Known gap, stated here rather than left to be discovered: object-storage calls go out
-through the `mc` command-line client, which has no header injection point, so that hop
-is untraced. Someone who finds a hole in a trace should be able to confirm it is
+through `boto3`, which does not yet propagate `traceparent`, so that hop is
+not traced yet. Someone who finds a hole in a trace should be able to confirm it is
 expected instead of first suspecting their own query.
 
 ---

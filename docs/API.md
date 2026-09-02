@@ -66,9 +66,9 @@ half: **a receiver must match the name case-insensitively.** If you are
 comparing a packet capture against the lowercase spelling used in the
 specification, this is why they differ, and it is not a defect.
 
-Known gap: object-storage traffic leaves through the `mc` command-line client,
-which offers no place to inject a header. That hop carries no `traceparent`, so
-a trace stops at the object-store boundary rather than continuing through it.
+Known gap: object-storage traffic leaves through `boto3`, which
+does not yet propagate `traceparent`. That hop is not traced yet, so a trace
+stops at the object-store boundary rather than continuing through it.
 
 ## Routes
 

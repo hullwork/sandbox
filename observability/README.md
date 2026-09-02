@@ -68,8 +68,9 @@ trace-id log correlation remains available.
 
 ## Known gaps
 
-- The native `mc` subprocess has no trace-header injection point. Its local
-  operation is a span, but the S3/RGW server side is not its child.
+- Object-storage calls go out through `boto3`, which does not yet propagate
+  `traceparent`, so that hop is not traced yet. The local operation is a span,
+  but the S3/RGW server side is not its child.
 - Worker node provisioning is outside the Sandbox product boundary. infra's
   node-pool provider must emit the autoscaler decision/VM bootstrap/CNI/CSI-ready
   spans; `sandbox_runtime_create_phase_seconds{phase="pod_ready"}` begins only
