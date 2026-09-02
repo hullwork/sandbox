@@ -12,9 +12,11 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler
 from http import HTTPStatus
 from pathlib import Path, PurePosixPath
+import errno
 import hmac
 import json
 import os
+import secrets
 from urllib.parse import parse_qs, urlparse
 import re
 import shutil
@@ -152,6 +154,116 @@ def _local_atomic_write(path: Path, content: bytes) -> None:
             pass
 
 
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+
+
+def _open_workspace_directory(
+    workspace_id: str, parts: tuple[str, ...], *, create: bool
+) -> int:
+    """Open the directory ``parts`` names inside the Workspace, one component at a time, following no link.
+
+    ``local_safe_path`` resolved and verified the path, but that was a moment
+    ago. The volume role sees the whole volume with the tenant's own uid, and
+    between that verdict and the open a tenant can swap a directory of theirs
+    for a symlink into a sibling Workspace; a write or read on the verified
+    string would then land there. Every component here is opened with
+    O_NOFOLLOW relative to the previous fd, so what comes back is that chain
+    of real directories under the Workspace root, or a refusal. ``parts`` are
+    the *resolved* components, which is why a link that pointed inside the
+    Workspace at check time still works: its target's real name is walked.
+    With ``create`` missing directories are made on the way down."""
+    fd = os.open(str(workspace_dir(workspace_id)), _DIRECTORY_FLAGS)
+    try:
+        for name in parts:
+            try:
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                if not create:
+                    raise ValueError("path is not a file") from None
+                try:
+                    os.mkdir(name, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                child = os.open(name, _DIRECTORY_FLAGS, dir_fd=fd)
+            except OSError as exc:
+                # Linux answers O_DIRECTORY|O_NOFOLLOW on a link with ENOTDIR,
+                # not ELOOP; look at the entry to say which it was.
+                if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise ValueError(_not_a_directory_because(fd, name)) from exc
+                raise
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _not_a_directory_because(dir_fd: int, name: str) -> str:
+    try:
+        mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
+    except OSError:
+        return "path is not a directory"
+    return "path crosses a symbolic link" if stat.S_ISLNK(mode) else "path is not a directory"
+
+
+def _open_workspace_file(workspace_id: str, parts: tuple[str, ...]) -> int:
+    """Open a regular file for reading through the same no-follow walk."""
+    dir_fd = _open_workspace_directory(workspace_id, parts[:-1], create=False)
+    try:
+        try:
+            fd = os.open(
+                parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd
+            )
+        except FileNotFoundError:
+            raise ValueError("path is not a file") from None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise ValueError("path crosses a symbolic link") from exc
+            raise
+    finally:
+        os.close(dir_fd)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError("path is not a file")
+    return fd
+
+
+def _local_atomic_write_at(dir_fd: int, name: str, content: bytes) -> None:
+    """``_local_atomic_write`` addressed through a directory fd.
+
+    ``tempfile.mkstemp`` has no ``dir_fd``; the O_EXCL loop is what it does
+    inside. The temporary lives in the same directory, so the final rename is
+    a move within one already-opened directory and cannot land anywhere the
+    walk did not open. A leaf that is not a regular file - a link that
+    appeared after the check included - is refused rather than replaced."""
+    try:
+        existing = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and not stat.S_ISREG(existing.st_mode):
+        raise ValueError("path is not a file")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+    while True:
+        temporary = f"sandbox-{secrets.token_hex(6)}"
+        try:
+            handle_fd = os.open(temporary, flags, 0o600, dir_fd=dir_fd)
+        except FileExistsError:
+            continue
+        break
+    try:
+        with os.fdopen(handle_fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        try:
+            os.unlink(temporary, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+
+
 def local_write_file(workspace_id: str, payload: dict) -> dict:
     """Local version /v1/files/write.
 
@@ -173,7 +285,12 @@ def local_write_file(workspace_id: str, payload: dict) -> dict:
         raise ValueError("file is too large")
     root = workspace_dir(workspace_id).resolve(strict=False)
     path = local_safe_path(workspace_id, raw_path)
-    _local_atomic_write(path, encoded)
+    parts = path.relative_to(root).parts
+    dir_fd = _open_workspace_directory(workspace_id, parts[:-1], create=True)
+    try:
+        _local_atomic_write_at(dir_fd, parts[-1], encoded)
+    finally:
+        os.close(dir_fd)
     return {
         "workspace_id": workspace_id,
         "path": _relative_display(root, path),
@@ -191,10 +308,14 @@ def local_read_file(
     """Local version /v1/files/read. The window semantics are exactly the same as file-service, including clipped_line."""
     root = workspace_dir(workspace_id).resolve(strict=False)
     path = local_safe_path(workspace_id, raw_path)
-    if not path.is_file():
-        raise ValueError("path is not a file")
-    if path.stat().st_size > control_plane.LOCAL_MAX_READ_SOURCE_BYTES:
-        raise ValueError("file is too large")
+    fd = _open_workspace_file(workspace_id, path.relative_to(root).parts)
+    try:
+        if os.fstat(fd).st_size > control_plane.LOCAL_MAX_READ_SOURCE_BYTES:
+            raise ValueError("file is too large")
+        handle = os.fdopen(fd, "r", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
     start = max(offset, 1)
     window = min(limit, control_plane.LOCAL_MAX_READ_LINES) if limit > 0 else control_plane.LOCAL_MAX_READ_LINES
     lines: list[str] = []
@@ -204,7 +325,7 @@ def local_read_file(
     clipped_line = 0
     clipped_length = 0
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with handle:
             for line_number, line in enumerate(handle, start=1):
                 if line_number < start:
                     continue
