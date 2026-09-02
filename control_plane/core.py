@@ -632,7 +632,6 @@ if OBJECT_STORE_ADDRESSING_STYLE not in {"auto", "virtual", "path"}:
     raise ValueError(
         "OBJECT_STORE_ADDRESSING_STYLE must be auto, virtual, or path"
     )
-MC_CONFIG_LOCK = threading.Lock()
 for _name, _value in (
     ("SANDBOX_TTL_SECONDS", SANDBOX_TTL_SECONDS),
     ("WORKSPACE_IDLE_TTL_SECONDS", WORKSPACE_IDLE_TTL_SECONDS),

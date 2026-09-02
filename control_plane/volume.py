@@ -152,6 +152,27 @@ def _local_atomic_write(path: Path, content: bytes) -> None:
             pass
 
 
+def _record_local_activity(workspace_id: str) -> None:
+    """Refresh `.sandbox/last_used_at` for a Workspace served through the volume role.
+
+    🔴 Why: file-service's record_activity is the only other writer of this marker, and it runs inside a
+       Runtime. A Workspace that is only ever read and written through the volume role - never given a
+       Runtime - therefore never gets a marker, and gc_workspaces falls back to the directory's mtime,
+       which writes inside subdirectories do not move. Thirty days after creation the CronJob deletes a
+       Workspace that was in use that morning.
+    Constraint: the marker must not decide the request. A read that succeeded is a read; failing it
+         because the metadata write did not land would be the wrong trade, so OSError is swallowed.
+    Constraint: never touch anything but the marker; `.sandbox` is off limits to callers (local_safe_path)
+         and this is the one legitimate write into it."""
+    try:
+        _local_atomic_write(
+            workspace_dir(workspace_id) / ".sandbox" / "last_used_at",
+            f"{int(time.time())}\n".encode("ascii"),
+        )
+    except (OSError, ValueError):
+        pass
+
+
 def local_write_file(workspace_id: str, payload: dict) -> dict:
     """Local version /v1/files/write.
 
@@ -174,6 +195,7 @@ def local_write_file(workspace_id: str, payload: dict) -> dict:
     root = workspace_dir(workspace_id).resolve(strict=False)
     path = local_safe_path(workspace_id, raw_path)
     _local_atomic_write(path, encoded)
+    _record_local_activity(workspace_id)
     return {
         "workspace_id": workspace_id,
         "path": _relative_display(root, path),
@@ -243,6 +265,7 @@ def local_read_file(
     if clipped_line:
         payload["clipped_line"] = clipped_line
         payload["clipped_length"] = clipped_length
+    _record_local_activity(workspace_id)
     return payload
 
 def local_create_workspace(workspace_id: str) -> dict:
@@ -270,8 +293,12 @@ def local_admit_workspace(workspace_id: str, maximum: int) -> dict:
     with _WORKSPACE_ADMISSION_LOCK:
         root = workspace_dir(workspace_id)
         if not root.is_dir():
+            # Same filter as local_list_workspaces: only directories named like a
+            # Workspace count. `lost+found` or an operator's stray directory used
+            # to take a slot of the quota without ever appearing in the listing.
             existing = sum(
                 child.is_dir()
+                and control_plane.WORKSPACE_ID.fullmatch(child.name) is not None
                 for child in Path(control_plane.WORKSPACE_VOLUME_ROOT).iterdir()
             )
             if existing >= maximum:
