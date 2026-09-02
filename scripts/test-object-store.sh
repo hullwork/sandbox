@@ -448,17 +448,41 @@ SANDBOX_CONTROL_PLANE_POD="$(
 # exercises the exact configured storage target.
 kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
   --namespace sandbox-system \
-  exec "${SANDBOX_CONTROL_PLANE_POD}" -- sh -ceu '
-    raw_endpoint=${OBJECT_STORE_ENDPOINT}
-    access_key=${OBJECT_STORE_ACCESS_KEY}
-    secret_key=${OBJECT_STORE_SECRET_KEY}
-    scheme=${raw_endpoint%%://*}
-    host=${raw_endpoint#*://}
-    export MC_HOST_sandbox="${scheme}://${access_key}:${secret_key}@${host}"
-    export MC_CONFIG_DIR=/tmp/mc
-    if mc admin info sandbox >/dev/null 2>&1; then
-      exit 1
-    fi
+  exec "${SANDBOX_CONTROL_PLANE_POD}" -- python3 -c '
+import json
+import os
+import sys
+
+import boto3
+from botocore.config import Config
+from botocore.exceptions import ClientError
+
+# The probe has to exist before its failure means anything. This check used to
+# run `mc admin info` and treat any non-zero exit as "denied"; once mc was
+# removed from the image the exit was 127 and the check passed for the wrong
+# reason -- a command not found is indistinguishable from a credential refused
+# unless you look.
+store = boto3.client(
+    "s3",
+    endpoint_url=os.environ["OBJECT_STORE_ENDPOINT"],
+    aws_access_key_id=os.environ["OBJECT_STORE_ACCESS_KEY"],
+    aws_secret_access_key=os.environ["OBJECT_STORE_SECRET_KEY"],
+    config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+)
+
+bucket = os.environ["OBJECT_STORE_WORKSPACE_BUCKET"]
+try:
+    policy = json.dumps({"Version": "2012-10-17", "Statement": []})
+    store.put_bucket_policy(Bucket=bucket, Policy=policy)
+except ClientError as error:
+    code = error.response.get("Error", {}).get("Code", "")
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    if code in ("AccessDenied", "MethodNotAllowed") or status in (403, 405):
+        sys.exit(0)
+    print(f"refused, but not for the expected reason: {status} {code}", file=sys.stderr)
+    sys.exit(1)
+print("the Control Plane credential could rewrite a bucket policy", file=sys.stderr)
+sys.exit(1)
   '
 
 STAGE="object-delete"

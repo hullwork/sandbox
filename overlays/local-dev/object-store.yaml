@@ -29,21 +29,59 @@ spec:
         - name: initialize
           image: sandbox-control-plane:0.7.0
           imagePullPolicy: Never
-          command: ["/bin/sh", "-ec"]
+          command: ["python3", "-c"]
           args:
             - |
-              until mc alias set dev "$OBJECT_STORE_ENDPOINT" "$OBJECT_STORE_ACCESS_KEY" "$OBJECT_STORE_SECRET_KEY"; do
-                sleep 2
-              done
-              mc mb --ignore-existing "dev/$OBJECT_STORE_UPLOAD_BUCKET"
-              mc mb --ignore-existing "dev/$OBJECT_STORE_AGENT_BUCKET"
-              mc mb --ignore-existing "dev/$OBJECT_STORE_WORKSPACE_BUCKET"
-              mc version enable "dev/$OBJECT_STORE_UPLOAD_BUCKET"
-              mc version enable "dev/$OBJECT_STORE_AGENT_BUCKET"
-              mc version enable "dev/$OBJECT_STORE_WORKSPACE_BUCKET"
+              import os
+              import sys
+              import time
+
+              import boto3
+              from botocore.config import Config
+              from botocore.exceptions import BotoCoreError, ClientError
+
+              store = boto3.client(
+                  "s3",
+                  endpoint_url=os.environ["OBJECT_STORE_ENDPOINT"],
+                  aws_access_key_id=os.environ["OBJECT_STORE_ACCESS_KEY"],
+                  aws_secret_access_key=os.environ["OBJECT_STORE_SECRET_KEY"],
+                  config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+              )
+
+              # Bounded, unlike the `until mc alias set ...; do sleep 2; done`
+              # this replaced. That loop had no ceiling, and `set -e` does not
+              # apply inside an `until` condition, so a missing binary spun
+              # forever: the container never exited, backoffLimit never applied,
+              # and `make up-local` hung with no error anywhere.
+              deadline = time.monotonic() + 120
+              while True:
+                  try:
+                      store.list_buckets()
+                      break
+                  except (ClientError, BotoCoreError) as error:
+                      if time.monotonic() >= deadline:
+                          print(f"object store not reachable after 120s: {error}", file=sys.stderr)
+                          raise SystemExit(1)
+                      time.sleep(2)
+
+              for variable in (
+                  "OBJECT_STORE_UPLOAD_BUCKET",
+                  "OBJECT_STORE_AGENT_BUCKET",
+                  "OBJECT_STORE_WORKSPACE_BUCKET",
+              ):
+                  bucket = os.environ[variable]
+                  try:
+                      store.create_bucket(Bucket=bucket)
+                  except ClientError as error:
+                      code = error.response.get("Error", {}).get("Code", "")
+                      if code not in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
+                          raise
+                  store.put_bucket_versioning(
+                      Bucket=bucket,
+                      VersioningConfiguration={"Status": "Enabled"},
+                  )
+                  print(f"{bucket}: created and versioned")
           env:
-            - name: MC_CONFIG_DIR
-              value: /tmp/mc
             - name: OBJECT_STORE_ENDPOINT
               valueFrom:
                 configMapKeyRef:

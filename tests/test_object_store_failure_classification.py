@@ -45,6 +45,10 @@ OUTAGE_EXCEPTION_SAMPLES = {
     "ConnectTimeoutError": {"endpoint_url": "http://127.0.0.1:1"},
     "ReadTimeoutError": {"endpoint_url": "http://127.0.0.1:1"},
     "ConnectionClosedError": {"endpoint_url": "http://127.0.0.1:1"},
+    # Raised while a body is being consumed rather than while the request is
+    # made. A download that dies halfway is the storage going out of reach.
+    "ResponseStreamingError": {"error": "connection reset"},
+    "IncompleteReadError": {"actual_bytes": 400, "expected_bytes": 1000},
 }
 
 #: Answered, and the answer was no. None of these may be promoted to an outage.
@@ -62,7 +66,9 @@ from botocore.exceptions import (
     ConnectionClosedError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    IncompleteReadError,
     ReadTimeoutError,
+    ResponseStreamingError,
 )
 from control_plane import core
 
@@ -71,6 +77,8 @@ TRANSPORT = {
     "ConnectTimeoutError": ConnectTimeoutError,
     "ReadTimeoutError": ReadTimeoutError,
     "ConnectionClosedError": ConnectionClosedError,
+    "ResponseStreamingError": ResponseStreamingError,
+    "IncompleteReadError": IncompleteReadError,
 }
 
 

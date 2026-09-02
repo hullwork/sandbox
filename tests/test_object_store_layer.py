@@ -30,12 +30,25 @@ def when(day):
 
 
 class Body:
+    """Modelled on botocore's StreamingBody, including the trap in it.
+
+    `StreamingBody.__enter__` returns its `_raw_stream`, not itself -- so
+    `with response["Body"] as x` hands back urllib3's response object and reads
+    on it raise urllib3 exceptions that are neither ClientError nor
+    BotoCoreError nor OSError. The earlier fake returned `self` from
+    `__enter__`, which made the `with` form look harmless and is why this suite
+    could not see the bug. It now raises instead: nothing here may use `with`.
+    """
     def __init__(self, data):
         self.data = data
+        self.closed = False
     def __enter__(self):
-        return self
-    def __exit__(self, *exc):
-        return False
+        raise AssertionError(
+            "do not use `with` on a body: StreamingBody.__enter__ returns the "
+            "raw urllib3 stream and its exceptions escape every handler"
+        )
+    def close(self):
+        self.closed = True
     def read(self, size=-1):
         if size is None or size < 0:
             out, self.data = self.data, b""
@@ -53,14 +66,19 @@ class Paginator:
 
 
 class Fake:
-    def __init__(self, body=b"", pages=None, version_pages=None):
+    def __init__(self, body=b"", pages=None, version_pages=None, declared=None):
         self.calls = []
         self.body = body
+        self.declared = declared
         self.pages = pages or [{}]
         self.version_pages = version_pages or [{}]
     def get_object(self, **kwargs):
         self.calls.append(("get_object", kwargs))
-        return {"Body": Body(self.body)}
+        # Real responses carry ContentLength, and object_get compares it
+        # against what it actually read. `declared` lets a case send fewer
+        # bytes than it promises.
+        declared = self.declared if self.declared is not None else len(self.body)
+        return {"Body": Body(self.body), "ContentLength": declared}
     def head_object(self, **kwargs):
         self.calls.append(("head_object", kwargs))
         return self.head
@@ -74,6 +92,21 @@ class Fake:
         pages = self.pages if name == "list_objects_v2" else self.version_pages
         return Paginator(pages, self.calls, name)
 '''
+
+
+TRUNCATED_CASE = """
+import json
+store = Fake(body=b"x" * 400, declared=1000)
+core.object_store = lambda: store
+try:
+    core.object_get("b", "k", 4096)
+    verdict = "accepted"
+except core.ObjectStoreUnavailable:
+    verdict = "refused"
+except Exception as error:
+    verdict = type(error).__name__
+print(json.dumps({"verdict": verdict}))
+"""
 
 
 def run(case: str) -> dict:
@@ -117,6 +150,14 @@ print(json.dumps({"at_limit": len(at_limit), "over": over}))
         # Exactly at the limit and one byte past it must not collapse into the
         # same answer; the read asks for ceiling+1 precisely so they don't.
         self.assertEqual(out["over"], "refused")
+
+    def test_a_body_shorter_than_its_declared_length_is_an_outage(self) -> None:
+        out = run(TRUNCATED_CASE)
+        # urllib3 only raises IncompleteRead when a read returns nothing at
+        # all, so a connection cut mid-object hands back the prefix and no
+        # error. get_object() would then hash the prefix and return an answer
+        # that is self-consistent and wrong.
+        self.assertEqual(out["verdict"], "refused")
 
     def test_versions_are_ordered_oldest_first_and_latest_comes_from_the_store(self) -> None:
         out = run('''

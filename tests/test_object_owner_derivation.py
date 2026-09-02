@@ -102,12 +102,13 @@ PROBE = textwrap.dedent(
     MC_CALLS = []
 
     class FakeBody:
+        # No __enter__: botocore's StreamingBody returns its raw urllib3 stream
+        # from it, so the `with` form is a mistake the production code must not
+        # make. A fake that accepts `with` hides that.
         def __init__(self, data):
             self._data = data
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            return False
+        def close(self):
+            pass
         def read(self, size=-1):
             if size is None or size < 0:
                 data, self._data = self._data, b""
@@ -128,7 +129,8 @@ PROBE = textwrap.dedent(
             return {}
         def get_object(self, **kwargs):
             MC_CALLS.append(["read", kwargs["Bucket"], kwargs["Key"]])
-            return {"Body": FakeBody(b"hi")}
+            data = b"hi"
+            return {"Body": FakeBody(data), "ContentLength": len(data)}
         def head_object(self, **kwargs):
             MC_CALLS.append(["metadata", kwargs["Bucket"], kwargs["Key"]])
             return {"ContentLength": 2, "ETag": "e", "Metadata": {}}

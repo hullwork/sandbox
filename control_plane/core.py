@@ -37,7 +37,9 @@ from botocore.exceptions import (
     ConnectionClosedError,
     ConnectTimeoutError,
     EndpointConnectionError,
+    IncompleteReadError,
     ReadTimeoutError,
+    ResponseStreamingError,
 )
 
 import capability_ticket
@@ -1611,6 +1613,11 @@ _OUTAGE_EXCEPTIONS = (
     ConnectTimeoutError,
     ReadTimeoutError,
     ConnectionClosedError,
+    # Raised while a body is being consumed rather than while the request is
+    # being made. A download that dies halfway is the storage going out of
+    # reach, not the request being refused.
+    ResponseStreamingError,
+    IncompleteReadError,
 )
 
 
@@ -1690,12 +1697,31 @@ def object_put(
 def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
     def read() -> bytes:
         response = object_store().get_object(Bucket=bucket, Key=key)
-        with response["Body"] as stream:
+        # Not `with response["Body"]`: StreamingBody.__enter__ returns its
+        # _raw_stream, so the `with` form hands back urllib3's response object
+        # and reads on it raise urllib3 exceptions -- ProtocolError,
+        # ReadTimeoutError, IncompleteRead -- none of which is a ClientError, a
+        # BotoCoreError or an OSError. They pass through every handler here and
+        # in api.py and reach the socket server as an unhandled exception.
+        stream = response["Body"]
+        try:
             # One byte past the ceiling, so "exactly at the limit" and "over it"
             # stay distinguishable at the call site.
             data = stream.read(max_bytes + 1)
+        finally:
+            stream.close()
         if len(data) > max_bytes:
             raise ValueError("object storage response is too large")
+        # A truncated body is not a short object. urllib3 only raises
+        # IncompleteRead when a read returns nothing at all, so a connection cut
+        # mid-object hands back the prefix and no error -- and get_object()
+        # hashes that prefix and returns a self-consistent, wrong answer.
+        # `mc cat` used to catch this with its exit code.
+        declared = response.get("ContentLength")
+        if declared is not None and declared <= max_bytes and len(data) != declared:
+            raise ObjectStoreUnavailable(
+                "object storage is unreachable; retry shortly"
+            )
         return data
 
     return object_call("read", read)
@@ -1777,15 +1803,19 @@ def object_stream(bucket: str, key: str) -> Any:
             except (ClientError, BotoCoreError, OSError) as error:
                 OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
                 raise _translate(error) from error
+            # See object_get: the `with` form yields urllib3's raw stream and
+            # its exceptions escape every handler between here and the socket.
+            body = response["Body"]
             try:
-                with response["Body"] as body:
-                    yield body
+                yield body
             except (ClientError, BotoCoreError, OSError) as error:
                 OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
                 raise _translate(error) from error
             except Exception:
                 OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
                 raise
+            finally:
+                body.close()
             OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="success")
 
 

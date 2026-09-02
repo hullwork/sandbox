@@ -49,7 +49,7 @@ operation fails; it never falls back to running on the host.
 ```bash
 python3 -m venv .venv                  # a system-wide install is an error on Debian,
 .venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
-make test                      # 672 unit and contract tests, no network, no cluster
+make test                      # 673 unit and contract tests, no network, no cluster
 make help                      # every Make target with its one-line description
 ```
 

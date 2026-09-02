@@ -154,10 +154,19 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
         text = (REPO_ROOT / "overlays/local-dev/object-store.yaml").read_text()
         rook = (REPO_ROOT / "rook/cluster-local.yaml").read_text()
         self.assertNotIn("object-store-root-credentials", text)
+        # No administrative API, whatever client is used to reach it.
         self.assertNotIn("mc admin", text)
+        self.assertNotIn("put_bucket_policy", text)
         self.assertIn("kind: CephObjectStoreUser", rook)
         self.assertIn("name: sandbox-runtime", rook)
-        self.assertEqual(text.count("mc version enable"), 3)
+        # Versioning on every bucket the Job creates. This counted
+        # `mc version enable` until the MinIO Client was removed; counting the
+        # command was always a proxy for "all three, none forgotten", so the
+        # proxy moved and the assertion did not.
+        self.assertEqual(text.count("OBJECT_STORE_UPLOAD_BUCKET"), 2)
+        self.assertEqual(text.count("OBJECT_STORE_AGENT_BUCKET"), 2)
+        self.assertEqual(text.count("OBJECT_STORE_WORKSPACE_BUCKET"), 2)
+        self.assertIn("VersioningConfiguration", text)
 
 if __name__ == "__main__":
     unittest.main()
