@@ -176,6 +176,80 @@ class RuntimeLookupTests(unittest.TestCase):
         ensure_runtime.assert_not_called()
 
 
+class BrokenResponseTests(unittest.TestCase):
+    """A response missing a promised field is a 502, never a KeyError.
+
+    The CLI's except tuple has no KeyError in it and the MCP bridge would
+    report one as an internal error; list_runtimes already treats a missing
+    list as 502, and the lease-creating calls now agree with it.
+    """
+
+    def manager_with_response(self, payload: dict) -> sandbox_client.SandboxManager:
+        manager = sandbox_client.SandboxManager()
+        lease = sandbox_client.Lease(session_id="session-id")
+        self.enterContext(mock.patch.object(manager, "_lease", return_value=lease))
+        self.enterContext(
+            mock.patch.object(
+                manager, "_request", return_value=(payload, "application/json")
+            )
+        )
+        return manager
+
+    def test_a_workspace_response_without_a_token_is_a_502(self) -> None:
+        manager = self.manager_with_response({"workspace_id": "ws-000000000001"})
+        with self.assertRaises(sandbox_client.ControlPlaneError) as caught:
+            manager.ensure_workspace("demo")
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn("access_token", str(caught.exception))
+
+    def test_a_workspace_response_without_an_id_is_a_502(self) -> None:
+        manager = self.manager_with_response({"access_token": "scoped"})
+        with self.assertRaises(sandbox_client.ControlPlaneError) as caught:
+            manager.ensure_workspace("demo")
+        self.assertEqual(caught.exception.status, 502)
+
+    def test_a_runtime_response_without_an_id_is_a_502(self) -> None:
+        manager = sandbox_client.SandboxManager()
+        lease = sandbox_client.Lease(
+            session_id="session-id", workspace_id="ws-000000000001"
+        )
+        with (
+            mock.patch.object(manager, "ensure_workspace", return_value=lease),
+            mock.patch.object(
+                manager,
+                "_request",
+                return_value=({"access_token": "scoped"}, "application/json"),
+            ),
+        ):
+            with self.assertRaises(sandbox_client.ControlPlaneError) as caught:
+                manager.ensure_runtime("demo")
+        self.assertEqual(caught.exception.status, 502)
+        self.assertIn("no id", str(caught.exception))
+        self.assertIsNone(lease.sandbox_id)
+
+    def test_a_token_response_without_a_token_is_a_502_on_lookup(self) -> None:
+        manager = sandbox_client.SandboxManager()
+        lease = sandbox_client.Lease(
+            session_id="session-id", workspace_id="ws-000000000001"
+        )
+        with (
+            mock.patch.object(
+                manager,
+                "resolve_workspace",
+                return_value=(
+                    lease,
+                    {"workspace_id": "ws-000000000001", "sandbox_id": "sb-000000000002"},
+                ),
+            ),
+            mock.patch.object(
+                manager, "_request", return_value=({}, "application/json")
+            ),
+        ):
+            with self.assertRaises(sandbox_client.ControlPlaneError) as caught:
+                manager.lookup_runtime("demo")
+        self.assertEqual(caught.exception.status, 502)
+
+
 class SandboxFacadeTests(unittest.TestCase):
     def test_run_command_quotes_each_argument_and_maps_result(self) -> None:
         manager = mock.Mock()
