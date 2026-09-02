@@ -12,7 +12,9 @@ browser.
 
 Four entry points name a tenant: tenant creation, key issuance, the tenant a
 credential represents (session claim, or ``X-Sandbox-Tenant`` on an admin
-key), and the OIDC role mapping. Each is exercised here against the real
+key), and the OIDC role mapping. Two more can only hurt it: suspending or
+deleting the row through the admin routes would suspend everything the
+management plane itself created, with no credential left to undo it. Each is exercised here against the real
 handler over HTTP with a SQLite store; the row itself is still created on
 demand by the management plane, through the internal entry ``create_tenant``
 no longer offers.
@@ -123,6 +125,13 @@ PROBE = textwrap.dedent(
         except StoreError as exc:
             results["store_create"] = str(exc)
 
+        call("suspend_reserved", "POST", "/v1/admin/tenants/management/status", admin, {"status": "suspended"})
+        call("delete_reserved", "DELETE", "/v1/admin/tenants/management", admin)
+        results["reserved_active_after"] = control_plane.STORE.get_tenant("management").active
+        call("suspend_other", "POST", "/v1/admin/tenants/managementx/status", admin, {"status": "suspended"})
+        call("delete_other", "DELETE", "/v1/admin/tenants/managementx", admin)
+        call("restore_other", "POST", "/v1/admin/tenants/managementx/status", admin, {"status": "active"})
+
         secure = control_plane.CONSOLE_COOKIES_SECURE
         cookie = session.cookie_name(session.COOKIE, secure=secure)
         for name, tenant in (("session_reserved", "management"), ("session_other", "managementx")):
@@ -210,6 +219,16 @@ class ReservedManagementTenantTests(unittest.TestCase):
         self.assertIn("reserved", refused["body"]["error"])
         self.assertIn("reserved", self.results["store_issue"])
         self.assertEqual(self.response("key_for_other")["status"], 201)
+
+    def test_the_reserved_row_cannot_be_suspended_or_deleted(self) -> None:
+        for name in ("suspend_reserved", "delete_reserved"):
+            with self.subTest(route=name):
+                self.assertEqual(self.response(name)["status"], 403, self.response(name))
+                self.assertIn("reserved", self.response(name)["body"]["error"])
+        self.assertTrue(self.results["reserved_active_after"])
+        # Controls: the same routes still work for an ordinary tenant.
+        for name in ("suspend_other", "delete_other", "restore_other"):
+            self.assertEqual(self.response(name)["status"], 200, self.response(name))
 
     def test_a_console_session_for_the_reserved_tenant_is_refused(self) -> None:
         self.assertEqual(self.response("session_reserved")["status"], 403)

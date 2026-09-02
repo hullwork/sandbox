@@ -558,6 +558,22 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     MANAGEMENT_TENANT = MANAGEMENT_TENANT
 
+    def reject_reserved_tenant(self, tenant_id: str) -> bool:
+        """403 for admin routes that would suspend or delete the reserved row.
+
+        Suspending ``management`` suspends every workspace and runtime the
+        management plane itself created (scoped tokens re-check the tenant's
+        status), and there is no credential that could act for it afterwards
+        to undo the mistake. Returns False when a response has been sent.
+        """
+        if tenant_id != MANAGEMENT_TENANT:
+            return True
+        self.send_json(
+            HTTPStatus.FORBIDDEN,
+            {"error": f"tenant id is reserved: {tenant_id}"},
+        )
+        return False
+
     def ensure_management_tenant(self) -> str:
         """The reserved tenant the unscoped management identity is filed under.
 
@@ -2623,6 +2639,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not self.require_admin():
                     return
                 tenant_id = match.group(1)
+                if not self.reject_reserved_tenant(tenant_id):
+                    return
                 status = self.read_json().get("status")
                 #Block illegal values here instead of waiting for the store to throw StoreError: that exception has been
                 # reported at the end of do_POST as a "store unavailable" 503, but "you sent an unrecognized
@@ -3167,6 +3185,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
             if match:
                 if not self.require_admin():
+                    return
+                if not self.reject_reserved_tenant(match.group(1)):
                     return
                 #Deactivate rather than delete: The Workspace under the tenant is still on the volume, directly deleting the record will cause
                 #Those directories become unowned. The data is left for disposal.
