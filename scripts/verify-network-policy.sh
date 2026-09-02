@@ -76,6 +76,48 @@ kubectl "${KUBECTL_ARGS[@]}" --namespace kube-system \
   --output=jsonpath='{.data.enable-k8s-networkpolicy}' \
   | grep -qx 'true'
 
+# The rest of this script is a behaviour check: it opens sockets and asserts what
+# does and does not connect. That is the right primary test -- a policy that
+# exists but does not enforce is worse than no policy -- but it cannot see one
+# layer of a redundant pair go missing. Deleting sandbox-default-deny on its own
+# leaves every probe below green, because sandbox-public-egress still refuses the
+# traffic they try. Measured, not assumed: deleting both turns the probes red and
+# names the addresses that opened.
+#
+# So the inventory is asserted separately. This is structure, not behaviour, and
+# neither substitutes for the other: this catches a layer disappearing while the
+# survivors happen to cover for it, and the probes catch a policy that is present
+# and not enforcing.
+expected_policies() {
+  cat <<'POLICIES'
+sandbox-system/sandbox-postgres-ingress
+sandbox-workloads/allow-control-plane-to-sandbox-services
+sandbox-workloads/allow-control-plane-to-volume-agent
+sandbox-workloads/sandbox-default-deny
+sandbox-workloads/sandbox-public-egress
+POLICIES
+}
+
+actual_policies() {
+  local namespace
+  for namespace in sandbox-system sandbox-workloads; do
+    kubectl "${KUBECTL_ARGS[@]}" --namespace "${namespace}" \
+      get networkpolicy --output=jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+      | sed "s#^#${namespace}/#"
+  done
+}
+
+# One direction only. A policy nobody expected is an operator adding their own
+# and is not this script's business; a policy that should be there and is not is.
+missing_policies="$(comm -23 <(expected_policies | sort) <(actual_policies | sort))"
+if [[ -n "${missing_policies}" ]]; then
+  echo "missing NetworkPolicy:" >&2
+  printf '  %s\n' ${missing_policies} >&2
+  echo "The probes below may still pass: a surviving policy can cover for a" >&2
+  echo "deleted one while the isolation it was part of is gone." >&2
+  exit 1
+fi
+
 SANDBOX_CONTROL_PLANE_TOKEN="$(
   kubectl "${KUBECTL_ARGS[@]}" --namespace sandbox-system \
     get secret sandbox-api-credentials \
