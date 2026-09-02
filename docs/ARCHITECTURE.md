@@ -1,5 +1,12 @@
 # Architecture
 
+## Scope
+
+This repository is released and deployed on its own. It depends on no other
+repository, and other products integrate with it as an external tenant: they
+hold an API key, call the published HTTP contract, and never share a database,
+a volume or a signing key with it.
+
 ## Process boundaries
 
 ```text
