@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -281,6 +282,28 @@ class DevelopmentScriptTests(unittest.TestCase):
             if platform.system() == "Linux" and not os.path.exists("/dev/kvm"):
                 self.assertIn("/dev/kvm is missing", skipped.stderr)
                 self.assertIn("QEMU TCG", skipped.stderr)
+
+    def test_rook_chart_is_pulled_and_checksummed_like_cilium(self) -> None:
+        script = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
+        cilium = (ROOT / "scripts/install-cilium-kubeadm.sh").read_text(encoding="utf-8")
+        self.assertNotIn("helm repo add rook-release", script)
+        self.assertIn("helm pull rook-ceph --repo https://charts.rook.io/release", script)
+        self.assertRegex(script, r"ROOK_CEPH_CHART_SHA256:-[0-9a-f]{64}\}")
+        self.assertIn("Rook chart checksum mismatch", script)
+        # Same tool as the Cilium installer, so the doctor's shasum check
+        # covers both.
+        self.assertIn("shasum -a 256", cilium)
+        self.assertIn("shasum -a 256", script)
+
+    def test_ceph_image_is_digest_pinned_and_identical_in_both_rook_manifests(self) -> None:
+        images = set()
+        for relative in ("rook/cluster-local.yaml", "rook/loop-device.yaml"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            found = re.findall(r"image: (quay\.io/ceph/ceph\S+)", text)
+            self.assertEqual(len(found), 1, relative)
+            self.assertRegex(found[0], r"@sha256:[0-9a-f]{64}$", relative)
+            images.add(found[0])
+        self.assertEqual(len(images), 1, "the two Rook manifests must move together")
 
     def test_make_dev_token_outputs_only_the_decoded_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
