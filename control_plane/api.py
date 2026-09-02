@@ -651,6 +651,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
         return tenant.max_runtimes
 
+    @staticmethod
+    def quota_field(payload: dict, name: str, default: int) -> int:
+        """An integer quota from an admin request body, or 400.
+
+        🔴 Not ``int(payload.get(...))``: ``int(None)`` and ``int([])`` raise
+        TypeError, which the dispatcher does not translate, so a body with
+        ``"max_workspaces": null`` killed the handler thread and the client
+        saw the connection drop rather than an answer. ``int(True)`` is 1,
+        which is a quota nobody asked for.
+        """
+        value = payload.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        return value
+
     def require_admin(self) -> bool:
         """Management plane operations: create tenants and issue keys.
 
@@ -773,7 +788,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         body = b""
         if self.command == "POST":
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                # Outside the dispatcher's try: an unparseable header used to
+                # kill the thread. A negative length would make rfile.read
+                # wait for EOF instead.
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
+            if length < 0:
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
             if length > grafana_proxy.MAX_REQUEST_BYTES:
                 self.send_json(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -2436,14 +2467,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 display_name = payload.get("display_name") or tenant_id
                 if not isinstance(display_name, str) or len(display_name) > 128:
                     raise ValueError("display_name must be a string up to 128 chars")
+                max_workspaces = self.quota_field(
+                    payload, "max_workspaces", control_plane.MAX_WORKSPACES
+                )
+                max_runtimes = self.quota_field(
+                    payload, "max_runtimes", control_plane.MAX_RUNTIMES
+                )
                 try:
                     tenant = control_plane.STORE.create_tenant(
                         tenant_id,
                         display_name,
-                        max_workspaces=int(
-                            payload.get("max_workspaces", control_plane.MAX_WORKSPACES)
-                        ),
-                        max_runtimes=int(payload.get("max_runtimes", control_plane.MAX_RUNTIMES)),
+                        max_workspaces=max_workspaces,
+                        max_runtimes=max_runtimes,
                     )
                 except StoreError as exc:
                     # A duplicate tenant id lands here. Return 409 instead of 500: the caller must be able to tell "my request was wrong"
