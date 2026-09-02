@@ -5,7 +5,7 @@ import {
   Plus,
   Undo2,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { TenantStatus } from "../api";
 import { formatDbRelative, formatDbTime } from "../format";
@@ -57,6 +57,15 @@ export default function TenantsView({
   const [keyLabel, setKeyLabel] = useState("");
   // Plaintext keys live only here and disappear when the dialog closes.
   const [issued, setIssued] = useState<IssuedKeyView | null>(null);
+  const keysPanel = useRef<HTMLElement>(null);
+
+  // The key panel renders below the whole tenant table. Opened from a row near
+  // the bottom it would land off-screen and "View keys" would look like a no-op.
+  useEffect(() => {
+    if (inspecting) {
+      keysPanel.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }, [inspecting]);
 
   const load = useCallback(async () => {
     try {
@@ -168,6 +177,9 @@ export default function TenantsView({
   };
 
   const issueKey = async (tenantId: string) => {
+    if (busy === `${tenantId}:key`) {
+      return;
+    }
     setBusy(`${tenantId}:key`);
     try {
       setIssued(await api.issueApiKey(tenantId, keyLabel.trim() || "unnamed"));
@@ -233,6 +245,10 @@ export default function TenantsView({
               <input
                 value={draftId}
                 placeholder="acme"
+                autoFocus
+                autoCapitalize="none"
+                autoCorrect="off"
+                maxLength={32}
                 spellCheck={false}
                 onChange={(event) => setDraftId(event.target.value)}
               />
@@ -250,6 +266,8 @@ export default function TenantsView({
               <input
                 type="number"
                 min={1}
+                step={1}
+                inputMode="numeric"
                 value={draftWorkspaces}
                 onChange={(event) => setDraftWorkspaces(event.target.value)}
               />
@@ -259,6 +277,8 @@ export default function TenantsView({
               <input
                 type="number"
                 min={1}
+                step={1}
+                inputMode="numeric"
                 value={draftRuntimes}
                 onChange={(event) => setDraftRuntimes(event.target.value)}
               />
@@ -388,7 +408,7 @@ export default function TenantsView({
       </section>
 
       {inspecting ? (
-        <section className="card">
+        <section className="card" ref={keysPanel}>
           <div className="card-header">
             <h2 className="card-title">
               <KeyRound size={16} aria-hidden="true" />
@@ -401,7 +421,13 @@ export default function TenantsView({
             </span>
           </div>
 
-          <div className="form-panel">
+          <form
+            className="form-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void issueKey(inspecting);
+            }}
+          >
             <label className="field">
               <span>{t("tenants.keyLabel")}</span>
               <input
@@ -412,10 +438,9 @@ export default function TenantsView({
             </label>
             <div className="form-actions">
               <button
-                type="button"
+                type="submit"
                 className="button button-primary"
                 disabled={busy === `${inspecting}:key`}
-                onClick={() => void issueKey(inspecting)}
               >
                 {busy === `${inspecting}:key` ? (
                   <LoaderCircle className="spin" size={16} />
@@ -424,7 +449,7 @@ export default function TenantsView({
               </button>
             </div>
             <p className="form-note">{t("tenants.keyLabelNote")}</p>
-          </div>
+          </form>
 
           {keysLoading ? (
             <div className="state">

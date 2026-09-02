@@ -148,6 +148,7 @@ export const zhCN: EnglishMessages = {
   "files.incompleteRead": "（未读完）",
   "files.clippedLine": "第 {line} 行长 {length} 字符，已被硬截断，翻页也读不到剩余部分。",
   "files.selectFile": "选择左侧的文件查看内容（只读，仅支持 UTF-8 文本）。",
+  "files.loadMore": "继续读取后续行",
 
   "tenants.title": "租户",
   "tenants.count.one": "{count} 个",

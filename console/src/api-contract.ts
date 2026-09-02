@@ -53,7 +53,12 @@ export interface ControlPlaneApi {
   deleteSandbox(id: string): Promise<void>;
   deleteWorkspace(id: string): Promise<void>;
   listWorkspaceFiles(id: string, path: string): Promise<WorkspaceListView>;
-  readWorkspaceFile(id: string, path: string): Promise<WorkspaceReadView>;
+  /**
+   * @param offset 1-based line to start from. Pass the previous page's
+   *        `next_offset`, never `end_line + 1`: a hard-clipped line is skipped
+   *        by File Service and the two differ exactly there.
+   */
+  readWorkspaceFile(id: string, path: string, offset?: number): Promise<WorkspaceReadView>;
   listTenants(): Promise<TenantView[]>;
   createTenant(input: TenantInput): Promise<void>;
   setTenantStatus(id: string, status: TenantStatus): Promise<void>;

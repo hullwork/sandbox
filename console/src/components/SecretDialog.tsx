@@ -1,5 +1,5 @@
 import { Check, Copy, TriangleAlert, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { errorText, useI18n, type LocalizedError } from "../i18n";
 
 /**
@@ -28,6 +28,20 @@ export default function SecretDialog({
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<LocalizedError | null>(null);
+  const copyButton = useRef<HTMLButtonElement>(null);
+
+  // Focus lands on Copy, the one action this dialog exists for, and Escape
+  // closes it like the buttons do. Closing discards the plaintext either way.
+  useEffect(() => {
+    copyButton.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
 
   const copy = async () => {
     setCopyError(null);
@@ -81,7 +95,12 @@ export default function SecretDialog({
         ) : null}
 
         <div className="modal-actions">
-          <button type="button" className="button" onClick={() => void copy()}>
+          <button
+            type="button"
+            className="button"
+            ref={copyButton}
+            onClick={() => void copy()}
+          >
             {copied ? <Check size={16} /> : <Copy size={16} />}
             {copied ? t("common.copied") : t("common.copy")}
           </button>

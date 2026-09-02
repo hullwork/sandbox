@@ -146,6 +146,7 @@ export const en = {
   "files.incompleteRead": " (incomplete read)",
   "files.clippedLine": "Line {line} is {length} characters long and was hard-clipped; the remainder cannot be recovered by paging.",
   "files.selectFile": "Select a file on the left to view it (read-only; UTF-8 text only).",
+  "files.loadMore": "Load more lines",
 
   "tenants.title": "Tenants",
   "tenants.count.one": "{count} tenant",

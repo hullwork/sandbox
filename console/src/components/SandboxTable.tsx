@@ -56,11 +56,11 @@ export default function SandboxTable({
               </tr>
             </thead>
             <tbody>
-              {sandboxes.map((item) => {
+              {sandboxes.map((item, index) => {
                 const id = item.id ?? "";
                 const expired = isPast(item.expires_at);
                 return (
-                  <tr key={id || Math.random()}>
+                  <tr key={id || `row-${index}`}>
                     <td className="mono">{id || "—"}</td>
                     <td>
                       {item.status === "running" ? (
