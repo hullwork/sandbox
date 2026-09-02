@@ -291,24 +291,86 @@ store = Fake(version_pages=[{
 }])
 core.object_store = lambda: store
 core.object_delete_versions("b", "k")
-versioned = [c for c in store.calls if c[0] == "delete_objects"]
+versioned = [c[1] for c in store.calls if c[0] == "delete_object"]
+batched = [c for c in store.calls if c[0] == "delete_objects"]
 
 empty = Fake(version_pages=[{}])
 core.object_store = lambda: empty
 core.object_delete_versions("b", "k")
-plain = [c for c in empty.calls if c[0] == "delete_object"]
+plain = [c[1] for c in empty.calls if c[0] == "delete_object"]
 print(json.dumps({
-    "targets": versioned[0][1]["Delete"]["Objects"] if versioned else [],
-    "fell_back": bool(plain),
+    "targets": [{"Key": c["Key"], "VersionId": c["VersionId"]} for c in versioned],
+    "batched": len(batched),
+    "fell_back": bool(plain) and "VersionId" not in plain[0],
 }))
 ''')
+        # One delete_object per version, and never delete_objects: that verb is
+        # checksum-required in botocore, so the store receives a signed CRC32
+        # header regardless of request_checksum_calculation, and older RGW /
+        # MinIO answer 400 or 501 to it (see object_delete_versions).
         self.assertEqual(
             out["targets"],
             [{"Key": "k", "VersionId": "v1"}, {"Key": "k", "VersionId": "d1"}],
         )
+        self.assertEqual(out["batched"], 0)
         # A store without versioning reports no versions at all; without this
         # branch every purge on such a store silently deletes nothing.
         self.assertTrue(out["fell_back"])
+
+    def test_checkpoint_delete_reports_whether_history_really_went(self) -> None:
+        out = run('''
+import json
+from botocore.exceptions import ClientError
+
+def rejected(**kwargs):
+    raise ClientError({"Error": {"Code": "AccessDenied", "Message": "x"},
+                       "ResponseMetadata": {"HTTPStatusCode": 403}}, "ListObjectVersions")
+
+def outage(**kwargs):
+    raise ClientError({"Error": {"Code": "ServiceUnavailable", "Message": "x"},
+                       "ResponseMetadata": {"HTTPStatusCode": 503}}, "ListObjectVersions")
+
+class NoVersioning(Fake):
+    def get_paginator(self, name):
+        if name == "list_object_versions":
+            return type("P", (), {"paginate": staticmethod(rejected)})()
+        return super().get_paginator(name)
+
+class Down(Fake):
+    def get_paginator(self, name):
+        if name == "list_object_versions":
+            return type("P", (), {"paginate": staticmethod(outage)})()
+        return super().get_paginator(name)
+
+results = {}
+ws = "ws-0123456789ab"
+versioned = Fake(version_pages=[{"Versions": [{"Key": "workspaces/%s/checkpoints/cp-1.tar.gz" % ws, "VersionId": "v1"}]}])
+core.object_store = lambda: versioned
+results["versioned"] = core.delete_workspace_checkpoint(ws, "cp-1")["history_retained"]
+
+flat = NoVersioning()
+core.object_store = lambda: flat
+results["fallback"] = core.delete_workspace_checkpoint(ws, "cp-1")["history_retained"]
+results["fallback_plain_delete"] = [c[1].get("VersionId", "none") for c in flat.calls if c[0] == "delete_object"]
+
+down = Down()
+core.object_store = lambda: down
+try:
+    core.delete_workspace_checkpoint(ws, "cp-1")
+    results["outage"] = "swallowed"
+except core.ObjectStoreBusy:
+    results["outage"] = "raised"
+results["outage_deletes"] = [c for c in down.calls if c[0] == "delete_object"]
+print(json.dumps(results))
+''')
+        self.assertFalse(out["versioned"])
+        # The fallback ran a plain delete: the versions are still there and the
+        # response must say so instead of reporting a purge that did not happen.
+        self.assertTrue(out["fallback"])
+        self.assertEqual(out["fallback_plain_delete"], ["none"])
+        # An outage on the listing is not "this store has no versioning".
+        self.assertEqual(out["outage"], "raised")
+        self.assertEqual(out["outage_deletes"], [])
 
     def test_stat_accepts_both_metadata_spellings(self) -> None:
         out = run('''

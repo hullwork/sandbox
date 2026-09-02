@@ -59,9 +59,26 @@ def reap_expired_checkpoints(now: int | None = None) -> int:
                 or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
             ):
                 continue
-            control_plane.object_delete_versions(
-                control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
-            )
+            try:
+                control_plane.object_delete_versions(
+                    control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+                )
+            except control_plane.ObjectStoreBusy:
+                # An outage is not "no versioning here"; let the round fail and
+                # come back next hour rather than paper over it with a plain delete.
+                raise
+            except RuntimeError as exc:
+                # Same fallback as delete_workspace_checkpoint: a store without
+                # versioning rejects the versioned purge, and without this the
+                # sweep stopped at its first expired object on such stores.
+                print(
+                    f"[reaper] {key}: versioned purge rejected ({exc}); "
+                    "deleting the current version only",
+                    flush=True,
+                )
+                control_plane.object_delete(
+                    control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+                )
             removed += 1
         if not token:
             return removed

@@ -103,6 +103,10 @@ class WorkspaceOffline(RuntimeError):
     pass
 
 
+class ObjectStoreBusy(RuntimeError):
+    """Stands in for core.ObjectStoreBusy: retryable, and a RuntimeError subclass like the real one."""
+
+
 def pod(
     sandbox_id: str,
     *,
@@ -168,6 +172,7 @@ def build_control_plane(kube: FakeKube, store: FakeStore | None, *, busy: set[st
     control_plane.WORKSPACE_IDLE_TTL_SECONDS = 86_400
     control_plane.WorkspaceOffline = WorkspaceOffline
     control_plane.RuntimeDriverError = RuntimeDriverError
+    control_plane.ObjectStoreBusy = ObjectStoreBusy
     control_plane.touched: list[tuple[str, int]] = []
     control_plane.deleted_runtimes: list[str] = []
     control_plane.forgotten: list[str] = []
@@ -558,6 +563,41 @@ class CheckpointSweepTests(ReaperCase):
     def test_an_empty_bucket_is_one_page_and_no_deletes(self) -> None:
         removed, deleted, pages = self.sweep_checkpoints([])
         self.assertEqual((removed, deleted, pages), (0, [], 1))
+
+    def sweep_with_purge(self, purge, *, objects: list[dict]) -> tuple:
+        kube = FakeKube([])
+        control_plane = build_control_plane(kube, FakeStore())
+        control_plane.OBJECT_STORE_WORKSPACE_BUCKET = "workspaces"
+        control_plane.CHECKPOINT_RETENTION_SECONDS = self.RETENTION
+        plain: list[str] = []
+        control_plane.object_list_page = lambda bucket, prefix, *, continuation_token=None: (objects, None)
+        control_plane.object_delete_versions = purge
+        control_plane.object_delete = lambda bucket, key: plain.append(key)
+        reaper = load_reaper(control_plane)
+        with contextlib.redirect_stdout(io.StringIO()):
+            removed = reaper.reap_expired_checkpoints(now=NOW)
+        return removed, plain
+
+    def test_a_store_without_versioning_still_gets_its_checkpoints_swept(self) -> None:
+        """The versioned purge is rejected there; the sweep falls back to a plain delete
+        instead of stopping at its first expired object, as it did before."""
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(3)]
+
+        def rejected(bucket, key):
+            raise RuntimeError("object storage rejected the operation")
+
+        removed, plain = self.sweep_with_purge(rejected, objects=expired)
+        self.assertEqual(removed, 3)
+        self.assertEqual(plain, [item["key"] for item in expired])
+
+    def test_an_outage_during_the_sweep_is_not_papered_over(self) -> None:
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(3)]
+
+        def unreachable(bucket, key):
+            raise ObjectStoreBusy("object storage is unreachable; retry shortly")
+
+        with self.assertRaises(ObjectStoreBusy):
+            self.sweep_with_purge(unreachable, objects=expired)
 
 
 def load_admission_helpers(kube: FakeKube, *, ttl: int, idle_evict: int, now: float) -> dict:

@@ -2026,7 +2026,15 @@ def object_delete_versions(bucket: str, key: str) -> None:
     """Delete the object and every version and delete marker it has.
 
     `mc rm --versions --force` in one call; there is no single S3 verb for it.
-    """
+
+    🔴 One delete_object per version, not one delete_objects per thousand. DeleteObjects is an
+       operation botocore marks as checksum-**required**, so `request_checksum_calculation=
+       "when_required"` (see object_store) does not stop it from sending and signing
+       x-amz-checksum-crc32 - verified on the wire. The stores this platform says it supports
+       (older Ceph RGW, MinIO) answer 400 or 501 to that header, which turned every versioned purge
+       on them into a "rejected" and, in the reaper, stopped the checkpoint sweep at its first
+       expired object. delete_object with a VersionId carries no checksum requirement. The cost is
+       one round trip per version; a checkpoint key has a handful."""
     def purge() -> None:
         store = object_store()
         paginator = store.get_paginator("list_object_versions")
@@ -2044,10 +2052,9 @@ def object_delete_versions(bucket: str, key: str) -> None:
         if not targets:
             store.delete_object(Bucket=bucket, Key=key)
             return
-        for start in range(0, len(targets), 1000):
-            store.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": targets[start:start + 1000], "Quiet": True},
+        for target in targets:
+            store.delete_object(
+                Bucket=bucket, Key=target["Key"], VersionId=target["VersionId"]
             )
 
     object_call("delete", purge)
@@ -2837,8 +2844,13 @@ def delete_workspace_checkpoint(
     prefix = _checkpoint_prefix(workspace_id)
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"{prefix}{checkpoint_id}.tar.gz"
+    history_retained = False
     try:
         object_delete_versions(OBJECT_STORE_WORKSPACE_BUCKET, key)
+    except ObjectStoreBusy:
+        # Busy / unreachable is not "this store has no versioning"; retrying a
+        # plain delete would mask an outage as a success with history left behind.
+        raise
     except RuntimeError:
         # S3-compatible stores are not required to implement object
         # versioning. Aliyun OSS in compatibility mode rejects versioned
@@ -2846,11 +2858,15 @@ def delete_workspace_checkpoint(
         # succeeds; without this fallback every workspace purge on such a
         # store fails and leaks the ownership quota row forever.
         object_delete(OBJECT_STORE_WORKSPACE_BUCKET, key)
+        # 🔴 Say what happened: a plain delete on a versioned store leaves the
+        # versions (and writes a delete marker). Reporting False here told the
+        # caller the history was gone when it was not.
+        history_retained = True
     return {
         "workspace_id": workspace_id,
         "checkpoint_id": checkpoint_id,
         "deleted": True,
-        "history_retained": False,
+        "history_retained": history_retained,
     }
 
 
