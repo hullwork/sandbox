@@ -61,6 +61,12 @@ def reap_once(now: int | None = None) -> dict[str, int]:
     runtime_driver = control_plane.configured_runtime_driver()
     runtimes = runtime_driver.list_runtimes()
     active_workspaces: set[str] = set()
+    # Workspaces whose Runtime this round deleted. They get one round of grace from
+    # the idle sweep below: delete_runtime touches the store column, but that touch
+    # is throttled and may not land, and a Workspace whose only activity went through
+    # its Runtime would otherwise be swept in the very same 15s round its Runtime
+    # died - hours of work gone while the user was active minutes earlier.
+    released_workspaces: set[str] = set()
     removed_runtimes = 0
     reprieved_runtimes = 0
     # Reconciliation must use the Runtimes still alive after this round's scan, not the batch fetched at the start -
@@ -91,6 +97,8 @@ def reap_once(now: int | None = None) -> dict[str, int]:
                 continue
             control_plane.delete_runtime(sandbox_id)
             removed_runtimes += 1
+            if workspace_id:
+                released_workspaces.add(workspace_id)
             continue
         elif workspace_id:
             active_workspaces.add(workspace_id)
@@ -190,20 +198,25 @@ def reap_once(now: int | None = None) -> dict[str, int]:
         print(f"[reaper] workspace sweep skipped: {exc}", flush=True)
         candidates = []
     for workspace_id in candidates:
-        if workspace_id and workspace_id not in active_workspaces:
-            try:
-                control_plane.volume_agent_request(
-                    "DELETE",
-                    f"/v1/workspaces/{workspace_id}",
-                    query={"remove": "1"},
-                    timeout=120,
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                print(f"[reaper] {workspace_id} remove failed: {exc}", flush=True)
-                continue
-            # Deleting the data must also write off the row, otherwise the quota leaks permanently - see forget_workspace_row.
-            control_plane.forget_workspace_row(workspace_id)
-            removed_workspaces += 1
+        if not workspace_id or workspace_id in active_workspaces:
+            continue
+        if workspace_id in released_workspaces:
+            # Its Runtime died this round; the idle clock starts now, not in the past.
+            # Next round the store column decides as usual.
+            continue
+        try:
+            control_plane.volume_agent_request(
+                "DELETE",
+                f"/v1/workspaces/{workspace_id}",
+                query={"remove": "1"},
+                timeout=120,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[reaper] {workspace_id} remove failed: {exc}", flush=True)
+            continue
+        # Deleting the data must also write off the row, otherwise the quota leaks permanently - see forget_workspace_row.
+        control_plane.forget_workspace_row(workspace_id)
+        removed_workspaces += 1
     return {
         "runtimes": removed_runtimes,
         "workspaces": removed_workspaces,

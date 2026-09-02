@@ -437,6 +437,63 @@ class WorkspaceSweepTests(ReaperCase):
         self.assertEqual(removals, [("/v1/workspaces/ws-idle", {"remove": "1"}, 120)])
         self.assertEqual(control_plane.forgotten, ["ws-idle"])
 
+    def test_a_workspace_whose_runtime_died_this_round_is_not_swept(self) -> None:
+        """The round that deletes an expired Runtime must not also delete its Workspace.
+
+        Before this, delete-by-TTL did not add the Workspace to active_workspaces, and
+        the idle sweep in the same round read a column only admission had written: a
+        client that talked to its Runtime for hours lost the Workspace in the same 15s
+        round the Runtime hit the hard TTL. One round of grace; next round the store
+        column (refreshed by delete_runtime's touch) decides as usual."""
+        kube = FakeKube([
+            pod("sb-dead", expires_at=NOW - 1, workspace_id="ws-dying"),
+        ])
+        store = FakeStore()
+        store.idle_workspace_ids = ["ws-dying", "ws-idle"]
+        control_plane = build_control_plane(kube, store)
+        removals: list[str] = []
+
+        def volume_agent_request(method, path, query=None, timeout=None):
+            if method == "DELETE":
+                removals.append(path)
+                return 200, "{}", {}
+            raise AssertionError(f"unexpected volume request {method} {path}")
+
+        control_plane.volume_agent_request = volume_agent_request
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, ["sb-dead"])
+        self.assertEqual(result["runtimes"], 1)
+        self.assertEqual(removals, ["/v1/workspaces/ws-idle"])
+        self.assertEqual(control_plane.forgotten, ["ws-idle"])
+        self.assertEqual(result["workspaces"], 1)
+
+    def test_a_workspace_the_store_does_not_call_idle_is_never_swept(self) -> None:
+        """A recently touched Workspace is absent from idle_workspaces; the sweep has no
+        second opinion. The volume marker says "ancient" here and must not matter."""
+        kube = FakeKube([])
+        store = FakeStore()
+        store.idle_workspace_ids = []
+        control_plane = build_control_plane(kube, store)
+        removals: list[str] = []
+
+        def volume_agent_request(method, path, query=None, timeout=None):
+            if method == "GET" and path == "/v1/workspaces":
+                return 200, json.dumps({"workspaces": [
+                    {"id": "ws-touched", "last_used_at": NOW - 10 ** 6},
+                ]}), {}
+            if method == "DELETE":
+                removals.append(path)
+                return 200, "{}", {}
+            raise AssertionError(f"unexpected volume request {method} {path}")
+
+        control_plane.volume_agent_request = volume_agent_request
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(store.idle_calls, [control_plane.WORKSPACE_IDLE_TTL_SECONDS])
+        self.assertEqual(removals, [])
+        self.assertEqual(result["workspaces"], 0)
+
 
 def load_admission_helpers(kube: FakeKube, *, ttl: int, idle_evict: int, now: float) -> dict:
     """Extract idle-victim selection and provider-neutral Runtime admission.

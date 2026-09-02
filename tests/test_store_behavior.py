@@ -19,6 +19,7 @@ import importlib.util
 import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -332,6 +333,82 @@ class WorkspaceAdmissionTests(StoreCase):
         )
         self.assertEqual(self.store.owner_of("ws-admin"), TENANT)
         self.assertEqual(self.store.count_workspaces(TENANT), 3)
+
+
+class WorkspaceTouchTests(StoreCase):
+    """``touch_workspace`` is what keeps a Workspace out of the idle sweep.
+
+    The reaper's verdict is ``idle_workspaces`` and nothing else, and that column
+    used to be written by admission alone. These pin the two halves a mutation
+    would break silently: a touch moves the clock (a recently touched Workspace
+    is not a candidate), and the throttle means a touch inside the window
+    changes nothing - the same shape as ``touch_api_key``.
+    """
+
+    def admit(self, workspace_id: str = WORKSPACE) -> None:
+        self.store.admit_workspace(
+            TENANT,
+            workspace_id,
+            principal_kind="user",
+            principal_id="alice",
+            session_key="session-1",
+            limit=None,
+        )
+
+    def backdate_workspace(self, workspace_id: str, seconds: int) -> None:
+        with sqlite3.connect(self.path) as connection:
+            connection.execute(
+                "UPDATE sandbox_workspaces SET last_used_at = "
+                "datetime('now', ?) WHERE workspace_id = ?",
+                (f"-{seconds} seconds", workspace_id),
+            )
+            connection.commit()
+
+    def recorded_age(self, workspace_id: str) -> int:
+        """Seconds since the stored last_used_at, read back through list_workspaces."""
+        rows = {
+            row["workspace_id"]: row["last_used_at"]
+            for row in self.store.list_workspaces(TENANT)
+        }
+        return int(time.time()) - int(rows[workspace_id])
+
+    def test_a_touched_workspace_leaves_the_idle_candidates(self) -> None:
+        self.admit()
+        self.backdate_workspace(WORKSPACE, 7200)
+        self.assertEqual(self.store.idle_workspaces(3600), [WORKSPACE])
+        self.store.touch_workspace(WORKSPACE)
+        self.assertEqual(self.store.idle_workspaces(3600), [])
+        self.assertLessEqual(self.recorded_age(WORKSPACE), 5)
+
+    def test_a_touch_inside_the_throttle_window_writes_nothing(self) -> None:
+        self.admit()
+        self.backdate_workspace(WORKSPACE, 100)
+        self.store.touch_workspace(WORKSPACE)
+        # Still about 100s old: the WHERE refused the write. A touch that always
+        # wrote would make the column a constant now() under a polling client.
+        self.assertGreaterEqual(self.recorded_age(WORKSPACE), 95)
+
+    def test_a_touch_does_not_revive_a_reclaimed_workspace(self) -> None:
+        self.admit()
+        self.store.forget_workspace(TENANT, WORKSPACE)
+        self.backdate_workspace(WORKSPACE, 7200)
+        self.store.touch_workspace(WORKSPACE)
+        with sqlite3.connect(self.path) as connection:
+            deleted_at, last_used_at = connection.execute(
+                "SELECT deleted_at, last_used_at FROM sandbox_workspaces "
+                "WHERE workspace_id = ?",
+                (WORKSPACE,),
+            ).fetchone()
+        self.assertIsNotNone(deleted_at)
+        recorded = int(store_module._epoch_seconds(last_used_at))
+        self.assertGreaterEqual(int(time.time()) - recorded, 7000)
+
+    def test_list_workspaces_reports_the_store_clock_as_epoch_seconds(self) -> None:
+        self.admit()
+        self.backdate_workspace(WORKSPACE, 600)
+        row = self.store.list_workspaces(None)[0]
+        self.assertTrue(row["last_used_at"].isdigit(), row)
+        self.assertAlmostEqual(int(row["last_used_at"]), int(time.time()) - 600, delta=5)
 
 
 if __name__ == "__main__":

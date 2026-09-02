@@ -110,6 +110,12 @@ def main() -> None:
             "isolation. Untrusted code then shares the host kernel.",
             flush=True,
         )
+    advisory = control_plane.workspace_ttl_advisory(
+        control_plane.WORKSPACE_IDLE_TTL_SECONDS,
+        control_plane.RUNTIME_HARD_TTL_SECONDS,
+    )
+    if advisory:
+        print(f"[control_plane] WARNING: {advisory}", flush=True)
     if control_plane.CONTROL_PLANE_ROLE == "volume":
         run_volume_server()
     else:

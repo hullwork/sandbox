@@ -509,6 +509,26 @@ RUNTIME_HARD_TTL_SECONDS = int(
 WORKSPACE_IDLE_TTL_SECONDS = int(
     os.getenv("WORKSPACE_IDLE_TTL_SECONDS", "21600")
 )
+
+
+def workspace_ttl_advisory(idle_ttl: int, hard_ttl: int) -> str | None:
+    """The startup warning for WORKSPACE_IDLE_TTL_SECONDS <= SANDBOX_RUNTIME_HARD_TTL_SECONDS, or None.
+
+    A warning and not an assertion, on purpose: the defaults (6h idle vs 12h hard) have this shape in
+    every existing deployment, and refusing to start would take all of them down. The shape is survivable
+    now that Runtime life-cycle events and data-plane routes refresh the Workspace clock (touch_workspace);
+    it was fatal when only workspace admission did. It is still worth a line, because a client that
+    neither re-posts the lease nor touches the Workspace for idle_ttl seconds while its Runtime lives on
+    is a client whose data goes the round the Runtime dies."""
+    if idle_ttl > hard_ttl:
+        return None
+    return (
+        f"WORKSPACE_IDLE_TTL_SECONDS={idle_ttl} is not above "
+        f"SANDBOX_RUNTIME_HARD_TTL_SECONDS={hard_ttl}: a Workspace can reach its idle "
+        "limit while its Runtime is still alive, and is then swept in the round "
+        "the Runtime dies unless something refreshed it (file, object, checkpoint or "
+        "Runtime activity through the Control Plane does)."
+    )
 CHECKPOINT_RETENTION_SECONDS = int(
     os.getenv("CHECKPOINT_RETENTION_SECONDS", "2592000")
 )
@@ -2753,12 +2773,36 @@ def _admit_new_runtime(maximum: int) -> None:
         )
 
 
+def touch_workspace(workspace_id: str) -> None:
+    """Refresh the store's idle clock for a Workspace that was just used. Never fails the caller.
+
+    Responsibility: the one entry point for "this Workspace is in use" on the control-plane side; the
+         store throttles the write (Store.touch_workspace), so calling it on every request is cheap.
+    🔴 Why it must be called from the Runtime life cycle and the data routes, not only from workspace
+       admission: the reaper's idle verdict reads **only** sandbox_workspaces.last_used_at (never the
+       volume marker, which the tenant can forge). Before this, only POST /v1/workspaces wrote it, so a
+       client holding a lease for 6h+ without re-posting lost its Workspace the round its Runtime died.
+    Constraint: a store failure here is logged and swallowed - the request already passed its gates and
+         the idle window is hours; failing a file write because the touch did not land is the wrong
+         trade. Silent is not acceptable either, so the skip leaves a line."""
+    if STORE is None or not workspace_id:
+        return
+    try:
+        STORE.touch_workspace(workspace_id)
+    except StoreError as exc:
+        print(f"warning: workspace touch skipped for {workspace_id}: {exc}", flush=True)
+
+
 def touch_runtime(sandbox_id: str, now: int | None = None) -> RuntimeInstance:
     current = now or int(time.time())
-    return configured_runtime_driver().touch_runtime(
+    instance = configured_runtime_driver().touch_runtime(
         sandbox_id,
         current + SANDBOX_TTL_SECONDS,
     )
+    # A Runtime kept alive is a Workspace in use; see touch_workspace for why the
+    # store must hear about it and not only about workspace admission.
+    touch_workspace(instance.workspace_id)
+    return instance
 
 
 def volume_agent_request(
@@ -3103,6 +3147,9 @@ def ensure_runtime(
                 f"runtime {sandbox_id} was released while starting up",
             )
         RUNTIME_CREATE_SECONDS.observe(time.monotonic() - started_at)
+        # The reuse branch above touches through touch_runtime; a fresh Runtime is
+        # the same signal for the Workspace's idle clock.
+        touch_workspace(workspace_id)
         return pod
     except Exception as exc:
         RUNTIME_CREATE_FAILURES.inc(reason=create_failure_reason(exc))
@@ -3252,7 +3299,10 @@ def delete_runtime(sandbox_id: str) -> None:
         # GET /v1/sandboxes/{id} still reports active.
         release_runtime_state(UNTENANTED_RUNTIME, sandbox_id)
         return
+    workspace_id = ""
     try:
+        record = STORE.get_runtime(sandbox_id)
+        workspace_id = str((record or {}).get("workspace_id") or "")
         owner = STORE.runtime_owner(sandbox_id)
         if owner:
             STORE.release_runtime(owner, sandbox_id)
@@ -3264,6 +3314,11 @@ def delete_runtime(sandbox_id: str) -> None:
             f"survives until reconciled: {exc}",
             flush=True,
         )
+    # 🔴 The Runtime dying is the moment the Workspace's idle clock should **start**, not the moment it
+    # should be found already expired: the reaper sweeps idle Workspaces in the same round it deletes
+    # expired Runtimes, and a Workspace whose only activity went through its Runtime has a stale column.
+    # Read from the store row rather than the Pod: the Pod is already gone at this point.
+    touch_workspace(workspace_id)
 
 
 def remove_workspace_data(workspace_id: str) -> dict[str, Any]:
@@ -3436,6 +3491,7 @@ def workspace_view(
     runtime_attached: bool,
     *,
     tenant_id: str | None = None,
+    recorded_last_used_at: str | None = None,
 ) -> dict:
     """Interface model: read-only view of a Workspace.
 
@@ -3453,13 +3509,22 @@ def workspace_view(
     AI-LOCK: idle_expires_at and runtime_attached must be read together. The reclaim criterion is
          `reap_once`'s "**no active Runtime** and last_used_at + IDLE_TTL
          has passed" - looking at the time alone leads to the wrong conclusion "should have been reclaimed long ago but is still there", which is
-         the normal situation while a Runtime is attached. The two fields are presented separately to keep people from reading only one."""
+         the normal situation while a Runtime is attached. The two fields are presented separately to keep people from reading only one.
+
+    🔴 Two clocks, and only one of them decides. `last_used_at` in the view is the volume marker (file
+       activity inside the sandbox refreshes it; the tenant can also forge it). The reaper's verdict reads
+       the store column (idle_workspaces), which touch_workspace refreshes. `recorded_last_used_at` is
+       that column; when the caller supplies it, `idle_expires_at` is derived from it so the countdown
+       shown is the countdown the reaper runs. Without it (no store, legacy rows) the marker is the only
+       clock there is and the old derivation stands. The Workspace schema forbids extra fields, so the
+       store value is not exposed as a field of its own."""
     last_used_at = entry.get("last_used_at") or entry.get("created_at")
     idle_expires_at = None
-    if not runtime_attached and last_used_at:
+    reclaim_clock = recorded_last_used_at or last_used_at
+    if not runtime_attached and reclaim_clock:
         try:
             idle_expires_at = str(
-                int(last_used_at) + WORKSPACE_IDLE_TTL_SECONDS
+                int(reclaim_clock) + WORKSPACE_IDLE_TTL_SECONDS
             )
         except (TypeError, ValueError):
             idle_expires_at = None
