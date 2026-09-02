@@ -42,6 +42,43 @@ class ObjectOwnerTests(unittest.TestCase):
         self.assertEqual(seen[1]["payload"]["owner"], "legacy-host/alice")
 
 
+class WorkspacePathNormalisationTests(unittest.TestCase):
+    """The one path-normalisation point on the client side.
+
+    Every file_* tool in the MCP bridge goes through it. Nothing here is
+    security critical - the server re-checks - but a broken normaliser turns
+    a client-side ValueError into a server-side 400 with no test to say so.
+    """
+
+    def test_workspace_paths_are_made_relative(self) -> None:
+        for given, expected in (
+            ("/workspace", ""),
+            ("/workspace/x", "x"),
+            ("/workspace/a/b.txt", "a/b.txt"),
+            ("x", "x"),
+            ("a/b.txt", "a/b.txt"),
+        ):
+            with self.subTest(path=given):
+                self.assertEqual(
+                    sandbox_client.normalize_workspace_path(given), expected
+                )
+
+    def test_paths_outside_the_workspace_are_refused_by_this_function(self) -> None:
+        # The message pins which check answered: an absolute path that is not
+        # under /workspace, a home path, and an empty string each have their
+        # own branch and their own wording.
+        for given, message in (
+            ("/etc/passwd", "only /workspace paths"),
+            ("/workspaces/x", "only /workspace paths"),
+            ("~/x", "home paths"),
+            ("~", "home paths"),
+            ("", "non-empty string"),
+        ):
+            with self.subTest(path=given):
+                with self.assertRaisesRegex(ValueError, message):
+                    sandbox_client.normalize_workspace_path(given)
+
+
 class ConfigurationTests(unittest.TestCase):
     def test_missing_control_plane_token_fails_closed(self) -> None:
         manager = sandbox_client.SandboxManager()
