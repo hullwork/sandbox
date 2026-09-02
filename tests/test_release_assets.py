@@ -203,6 +203,25 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("prepare_release_assets.py", release)
         self.assertIn("--draft", release)
 
+    def test_release_assets_are_enumerated_as_files_from_one_flat_artifact(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        chart_job = RELEASE_WORKFLOW["jobs"]["helm-chart"]
+        upload = next(
+            step for step in chart_job["steps"]
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        )
+        # One common ancestor, so download-artifact lays the files out flat.
+        parents = {pathlib.PurePosixPath(line).parent for line in upload["with"]["path"].split()}
+        self.assertEqual(parents, {pathlib.PurePosixPath("chart-dist")})
+        publish = next(
+            step["run"] for step in RELEASE_WORKFLOW["jobs"]["github-release"]["steps"]
+            if step.get("name") == "Publish immutable-tag release assets"
+        )
+        self.assertNotIn("release/*", publish)
+        self.assertIn("find release -type f -print0", publish)
+        self.assertIn('"${assets[@]}"', publish)
+        self.assertNotIn("-maxdepth 1", release)
+
     def test_release_scans_before_promoting_official_image_tags(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         scan = release.index("Scan staged image before promotion")
