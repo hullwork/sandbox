@@ -56,6 +56,15 @@ GLOBAL_TENANT = "*"
 # rather than NULL for the same reason as GLOBAL_TENANT (tenant_id is part of the composite primary key of
 # sandbox_runtimes). '-' cannot collide with a real tenant name: TENANT_ID requires the first character to be [a-z0-9].
 UNTENANTED_RUNTIME = "-"
+# The reserved tenant row the unscoped management-plane identity is filed under
+# (ApiHandler.ensure_management_tenant). It matches TENANT_ID on purpose - it
+# is a real row so capability epochs can be revoked - so the name has to be
+# refused everywhere a caller could pick a tenant id: create_tenant,
+# issue_api_key, X-Sandbox-Tenant / session tenant (_assume_tenant) and the
+# OIDC tenant claim (oidc.role_of). Without that, whoever registers a tenant
+# called "management" owns every workspace and runtime the management plane
+# created, and can shrink the management plane's quota to any value.
+MANAGEMENT_TENANT = "management"
 # The minimum **shape** of an image reference. The real admission rule is the Control Plane's prefix whitelist, which is
 # only known at deployment time (environment variables); the store layer does not repeat it and only rejects the
 # bytes that would corrupt the Pod spec and logs - same reasoning as FREEFORM. The upper bound is 256: a
@@ -714,8 +723,30 @@ class Store:
                 "tenant id must match ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ "
                 "(the value is also used as a Kubernetes label)"
             )
+        if tenant_id == MANAGEMENT_TENANT:
+            raise StoreError(f"tenant id is reserved: {tenant_id}")
         if max_workspaces < 1 or max_runtimes < 1:
             raise StoreError("quotas must be positive")
+        return self._insert_tenant(
+            tenant_id, display_name, max_workspaces, max_runtimes
+        )
+
+    def create_management_tenant(self) -> Tenant:
+        """The only way the reserved row gets created; create_tenant refuses the name."""
+        return self._insert_tenant(
+            MANAGEMENT_TENANT,
+            "Reserved management-plane identity",
+            1024,
+            1024,
+        )
+
+    def _insert_tenant(
+        self,
+        tenant_id: str,
+        display_name: str,
+        max_workspaces: int,
+        max_runtimes: int,
+    ) -> Tenant:
         with self._cursor() as cursor:
             cursor.execute(
                 self._sql(
@@ -792,6 +823,11 @@ class Store:
         now: int | None = None,
     ) -> tuple[str, ApiKey]:
         """Issue a key. Returns (plaintext, record) - the plaintext is never retrievable again."""
+        if tenant_id == MANAGEMENT_TENANT:
+            # A key scoped to the reserved row would be a tenant credential
+            # over everything the management plane owns; the management plane
+            # is an admin key (tenant_id None), never a tenant key.
+            raise StoreError(f"tenant id is reserved: {tenant_id}")
         granted = frozenset(permissions)
         unknown = sorted(granted - KEY_PERMISSIONS)
         if unknown:

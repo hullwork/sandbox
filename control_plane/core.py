@@ -2276,7 +2276,18 @@ def parse_principal(
     kind is an **open enumeration** - user / agent / service / job is up to the tenant; the Control Plane
     assigns it no semantics and uses it only as derivation material and an index dimension. This is where "generic" lands: adding a dimension costs
     the Control Plane zero changes.
-    The defaults let callers that do not care about this dimension (including the agent host during the transition) keep working as before."""
+    The defaults let callers that do not care about this dimension (including the agent host during the transition) keep working as before.
+
+    🔴 ``principal_id`` / ``principal_type`` at the top level are refused, not
+    ignored (the same rule resolve_template applies to ``image``). The contract
+    once spelled the field that way, and a caller written against it got the
+    default workspace for every one of its end users - the same session id,
+    the same scoped token, no error anywhere."""
+    for legacy in ("principal_id", "principal_type"):
+        if legacy in payload:
+            raise ValueError(
+                f"{legacy} is not a field; send principal: {{kind, id}}"
+            )
     principal = payload.get("principal")
     if acting_subject:
         if principal is not None:

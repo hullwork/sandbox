@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 from .store import (
     GLOBAL_TENANT,
+    MANAGEMENT_TENANT,
     WORKSPACE_AT_CAPACITY,
     ApiKey,
     StoreError,
@@ -96,6 +97,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.request_started = time.monotonic()
         self.response_status = 500
         self.request_span = None
+        # 🔴 Identity is per request, never per connection. Every field the
+        # authentication path writes is reset here, so that under keep-alive
+        # (one handler instance, several requests) the second request cannot
+        # inherit the first one's tenant: require_control_plane_auth short-
+        # circuits on `authenticated`, and a reverse proxy that pools upstream
+        # connections would otherwise hand tenant A's identity to tenant B.
+        # Today protocol_version is HTTP/1.0, which closes after each
+        # response; this must not depend on that staying so.
+        self.authenticated = False
+        self.tenant_id = None
+        self.api_key = None
+        self.session_claims = None
+        self.acting_subject = None
+        self.scoped_claims = None
+        self.scoped_credential = False
+        self.object_owner = None
         try:
             super().handle_one_request()
         finally:
@@ -158,6 +175,27 @@ class ApiHandler(BaseHTTPRequestHandler):
         # Echoed so a caller can quote it in a bug report, and so a browser
         # devtools pane shows the same id the server logged.
         self.send_header(tracing.REQUEST_ID_HEADER, self.current_trace_id())
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Access log line without the query string.
+
+        🔴 The stdlib logs ``requestline`` verbatim, and the OIDC callback
+        arrives as ``GET /v1/auth/oidc/callback?code=...&state=...``: the
+        authorization code went into the process log on every sign-in. Only
+        the path is recorded; nothing in a query string is needed to read
+        the log, and credentials in it are the one thing that must not be.
+        """
+        if isinstance(code, HTTPStatus):
+            code = code.value
+        path = urlparse(getattr(self, "path", "") or "").path
+        self.log_message(
+            '"%s %s %s" %s %s',
+            getattr(self, "command", "?") or "?",
+            path,
+            getattr(self, "request_version", ""),
+            str(code),
+            str(size),
+        )
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(
@@ -429,6 +467,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not tenant_id:
             self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+        if tenant_id == MANAGEMENT_TENANT:
+            # The reserved row is never a tenant anyone represents: neither a
+            # session whose tenant claim says so, nor an admin key naming it in
+            # X-Sandbox-Tenant. Representing it would hand out the management
+            # plane's own workspaces and runtimes as if they were a tenant's.
+            self.send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": f"tenant id is reserved: {tenant_id}"},
+            )
+            return False
         if control_plane.STORE is None:
             #Without storage, there is no concept of tenants; specifying a tenant is a configuration error, and it should be stated clearly rather than silently.
             #Single tenant processing.
@@ -508,7 +556,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    MANAGEMENT_TENANT = "management"
+    MANAGEMENT_TENANT = MANAGEMENT_TENANT
 
     def ensure_management_tenant(self) -> str:
         """The reserved tenant the unscoped management identity is filed under.
@@ -528,12 +576,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         """
         if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
             try:
-                control_plane.STORE.create_tenant(
-                    self.MANAGEMENT_TENANT,
-                    "Reserved management-plane identity",
-                    max_workspaces=1024,
-                    max_runtimes=1024,
-                )
+                # Not create_tenant: that one refuses the reserved name so no
+                # caller can register it; this is the internal entry.
+                control_plane.STORE.create_management_tenant()
             except Exception:
                 if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
                     raise
@@ -642,6 +687,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 HTTPStatus.NOT_FOUND, f"unknown tenant: {tenant_id}"
             )
         return tenant.max_runtimes
+
+    @staticmethod
+    def quota_field(payload: dict, name: str, default: int) -> int:
+        """An integer quota from an admin request body, or 400.
+
+        🔴 Not ``int(payload.get(...))``: ``int(None)`` and ``int([])`` raise
+        TypeError, which the dispatcher does not translate, so a body with
+        ``"max_workspaces": null`` killed the handler thread and the client
+        saw the connection drop rather than an answer. ``int(True)`` is 1,
+        which is a quota nobody asked for.
+        """
+        value = payload.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        return value
 
     def require_admin(self) -> bool:
         """Management plane operations: create tenants and issue keys.
@@ -765,7 +825,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         body = b""
         if self.command == "POST":
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                # Outside the dispatcher's try: an unparseable header used to
+                # kill the thread. A negative length would make rfile.read
+                # wait for EOF instead.
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
+            if length < 0:
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
             if length > grafana_proxy.MAX_REQUEST_BYTES:
                 self.send_json(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -2428,14 +2504,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 display_name = payload.get("display_name") or tenant_id
                 if not isinstance(display_name, str) or len(display_name) > 128:
                     raise ValueError("display_name must be a string up to 128 chars")
+                max_workspaces = self.quota_field(
+                    payload, "max_workspaces", control_plane.MAX_WORKSPACES
+                )
+                max_runtimes = self.quota_field(
+                    payload, "max_runtimes", control_plane.MAX_RUNTIMES
+                )
                 try:
                     tenant = control_plane.STORE.create_tenant(
                         tenant_id,
                         display_name,
-                        max_workspaces=int(
-                            payload.get("max_workspaces", control_plane.MAX_WORKSPACES)
-                        ),
-                        max_runtimes=int(payload.get("max_runtimes", control_plane.MAX_RUNTIMES)),
+                        max_workspaces=max_workspaces,
+                        max_runtimes=max_runtimes,
                     )
                 except StoreError as exc:
                     # A duplicate tenant id lands here. Return 409 instead of 500: the caller must be able to tell "my request was wrong"
@@ -2824,7 +2904,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         sandbox_id,
                         workspace_id,
                         template_id,
-                        self.tenant_id or "management",
+                        self.tenant_id or MANAGEMENT_TENANT,
                         limit,
                     )
                     view = control_plane.sandbox_view(pod)
@@ -2852,7 +2932,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     sandbox_id,
                     workspace_id,
                     template_id,
-                    self.tenant_id or "management",
+                    self.tenant_id or MANAGEMENT_TENANT,
                     limit,
                 )
                 self.send_json(
