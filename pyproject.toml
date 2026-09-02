@@ -38,7 +38,7 @@ sandboxctl = "sandbox_platform.sandboxctl:main"
 # has no reason to acquire an S3 client. CI installs only this extra, which is
 # how a machine that happened to have boto3 already could run the whole suite
 # green while CI could not import a single test module.
-test = ["PyYAML>=6.0,<7", "boto3>=1.34,<2"]
+test = ["PyYAML>=6.0,<7", "boto3>=1.36,<2"]
 
 [tool.hatch.build.targets.wheel]
 # The wheel ships only the supported client surface, namespaced under

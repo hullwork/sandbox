@@ -140,6 +140,7 @@ attributed to a person, so:
 | `SANDBOX_ACTIVITY_PROBE_TIMEOUT` | `2` | Seconds allowed for the Runtime activity check that runs before an idle Runtime is evicted |
 | `SANDBOX_MAX_OBJECT_QUEUE` | `32` | Requests allowed to wait for the object-store slot; beyond it Control Plane answers `503` at once |
 | `SANDBOX_MAX_CONCURRENT_OBJECT_OPS` | `1` | Object-store operations in flight at once; each holds its body in memory, and the boto3 connection pool is sized to match |
+| `SANDBOX_MAX_LIST_ENTRIES` | `10000` | Rows one listing may return before it is refused. `read_timeout` bounds a single socket read, not an operation, so without this a slow trickle holds the operation slot indefinitely while the list grows in memory |
 | `SANDBOX_STORE_GAUGE_TTL_SECONDS` | `10` | Cache lifetime of the store-backed `/metrics` gauges, so scrapes do not each query the database |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, seconds `/readyz` reports `503` before listening stops, so Endpoints drop the Pod first |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_INFLIGHT_SECONDS` | `120` | Seconds to wait for in-flight requests and background Runtime creation after listening stops |

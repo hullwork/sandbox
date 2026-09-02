@@ -109,6 +109,69 @@ print(json.dumps({"verdict": verdict}))
 """
 
 
+CHECKSUM_CASE = """
+import json, socket, threading
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0)); srv.listen(4)
+seen = []
+def serve():
+    conn, _ = srv.accept()
+    seen.append(conn.recv(65536).decode("latin1").split("\\r\\n\\r\\n")[0])
+    conn.sendall(b"HTTP/1.1 200 OK\\r\\nContent-Length: 0\\r\\n\\r\\n"); conn.close()
+threading.Thread(target=serve, daemon=True).start()
+core.OBJECT_STORE_ENDPOINT = "http://127.0.0.1:%d" % srv.getsockname()[1]
+core._OBJECT_STORE_CLIENT = None
+try:
+    core.object_put("bkt", "k", b"hello")
+except Exception:
+    pass
+head = seen[0] if seen else ""
+print(json.dumps({
+    "method": head.split(" ")[0] if head else "",
+    "checksum_headers": [
+        line.split(":")[0] for line in head.splitlines()
+        if line.lower().startswith("x-amz-checksum")
+        or line.lower().startswith("x-amz-sdk-checksum")
+    ],
+}))
+"""
+
+
+CEILING_CASE = """
+import json
+core.MAX_LIST_ENTRIES = 10
+page = {"Contents": [
+    {"Key": "k%d" % i, "Size": 1, "LastModified": when(1)} for i in range(6)
+]}
+pages = [dict(page) for _ in range(20)]
+
+class Counting(list):
+    def __init__(self, items):
+        super().__init__(items)
+        self.taken = 0
+    def __iter__(self):
+        for item in super().__iter__():
+            self.taken += 1
+            yield item
+
+counted = Counting(pages)
+store = Fake(pages=counted)
+core.object_store = lambda: store
+try:
+    core.object_list("b", "p/")
+    verdict = "accepted"
+except ValueError:
+    verdict = "refused"
+except Exception as error:
+    verdict = type(error).__name__
+print(json.dumps({
+    "verdict": verdict,
+    "pages_fetched": counted.taken,
+    "pages_available": len(pages),
+}))
+"""
+
+
 def run(case: str) -> dict:
     environment = {
         **os.environ,
@@ -158,6 +221,29 @@ print(json.dumps({"at_limit": len(at_limit), "over": over}))
         # error. get_object() would then hash the prefix and return an answer
         # that is self-consistent and wrong.
         self.assertEqual(out["verdict"], "refused")
+
+    def test_an_upload_sends_no_checksum_headers(self) -> None:
+        out = run(CHECKSUM_CASE)
+        # boto3 1.36 began adding and signing x-amz-checksum-crc32 on every
+        # upload. Older Ceph RGW and MinIO answer 400 or 501 to it, which would
+        # fail every write against a store this platform claims to support --
+        # and a 400 classifies as "rejected", pointing the caller at the request
+        # instead of at the configuration. Asserted on the wire rather than on
+        # the Config object, because what matters is what the store receives.
+        self.assertEqual([], out["checksum_headers"])
+        self.assertIn("PUT", out["method"])
+
+    def test_a_listing_past_the_ceiling_is_refused_between_pages(self) -> None:
+        out = run(CEILING_CASE)
+        # The mc path had a byte ceiling per invocation; dropping the subprocess
+        # dropped it. Nothing else bounds a listing -- read_timeout is per
+        # socket read, so a slow trickle resets it forever while holding the one
+        # operation slot and growing the list in memory.
+        self.assertEqual("refused", out["verdict"])
+        # Refused while paginating, not after draining every page: fetching one
+        # page past the limit is the difference between a bounded failure and
+        # reading the whole bucket first and complaining afterwards.
+        self.assertLess(out["pages_fetched"], out["pages_available"])
 
     def test_versions_are_ordered_oldest_first_and_latest_comes_from_the_store(self) -> None:
         out = run('''

@@ -1580,6 +1580,16 @@ def object_store() -> Any:
                         if OBJECT_STORE_SIGNATURE_VERSION == "S3V4"
                         else "s3"
                     ),
+                    # boto3 1.36 began adding x-amz-checksum-crc32 and
+                    # x-amz-sdk-checksum-algorithm to every upload, and signing
+                    # them. README says this needs an S3-compatible store, not
+                    # AWS; older Ceph RGW and MinIO answer 400 InvalidRequest or
+                    # 501 to those headers, which would fail every upload -- and
+                    # a 400 classifies as "the request was rejected", sending
+                    # the caller off to fix a request that is fine. mc never
+                    # sent them, so this is a compatibility risk the swap would
+                    # have introduced rather than one that was already there.
+                    request_checksum_calculation="when_required",
                     s3={"addressing_style": OBJECT_STORE_ADDRESSING_STYLE},
                     # One connection per in-flight operation, matched to the
                     # semaphore rather than left at botocore's default of 10:
@@ -1603,6 +1613,17 @@ def object_store() -> Any:
 # gap: RGW answering 503 while the cluster is degraded produced wording nobody had captured,
 # so it landed in "rejected" - the expensive direction. botocore reports the status code, so
 # a 5xx is now classified from the response rather than from prose.
+#: How many rows a listing may return before it is refused. The mc path had a
+#: byte ceiling per invocation -- 2 MiB for a listing, 8 MiB for the reaper's
+#: sweep -- and dropping the subprocess dropped the ceiling with it. Nothing
+#: else bounds a listing: `read_timeout` is per socket read, so a slow trickle
+#: resets it forever while holding the single operation slot and growing the
+#: list in memory. These are the old byte limits at roughly 200 bytes per
+#: entry, which is what mc's JSON lines measured.
+MAX_LIST_ENTRIES = int(os.getenv("SANDBOX_MAX_LIST_ENTRIES", "10000"))
+if MAX_LIST_ENTRIES <= 0:
+    raise ValueError("SANDBOX_MAX_LIST_ENTRIES must be greater than zero")
+
 _OUTAGE_STATUS = frozenset({500, 502, 503, 504})
 #: Transport failures: the request never got an answer. Named rather than
 #: inlined so a test can assert every one of them has a sample -- a branch
@@ -1740,6 +1761,10 @@ def object_list(bucket: str, prefix: str) -> list[dict[str, Any]]:
                         "last_modified": _timestamp(item.get("LastModified")),
                     }
                 )
+            if len(items) > MAX_LIST_ENTRIES:
+                # Checked between pages, not after: the point is to stop
+                # fetching, not to discover afterwards how much was fetched.
+                raise ValueError("object storage listing is too large")
         return items
 
     return object_call("list", listing)
@@ -1767,6 +1792,8 @@ def object_versions(bucket: str, key: str) -> list[dict[str, Any]]:
                 if item.get("Key") != key:
                     continue
                 rows.append(_version_row(item, delete_marker=True))
+            if len(rows) > MAX_LIST_ENTRIES:
+                raise ValueError("object storage listing is too large")
         # Oldest first while numbering. A row with no timestamp sorts before
         # every dated one rather than raising: datetime and None are not
         # comparable, and one undated row would otherwise take out the listing.
@@ -1844,6 +1871,8 @@ def object_delete_versions(bucket: str, key: str) -> None:
                     targets.append(
                         {"Key": item["Key"], "VersionId": item["VersionId"]}
                     )
+            if len(targets) > MAX_LIST_ENTRIES:
+                raise ValueError("object storage listing is too large")
         if not targets:
             store.delete_object(Bucket=bucket, Key=key)
             return
