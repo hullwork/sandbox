@@ -95,7 +95,7 @@ Python 3.11+ installed.
 ```bash
 python3 -m venv .venv                  # a system-wide install is an error on Debian,
 .venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
-make test                      # 661 unit and contract tests, no network, no cluster
+make test                      # 664 unit and contract tests, no network, no cluster
 make help                      # every Make target with its one-line description
 ```
 
