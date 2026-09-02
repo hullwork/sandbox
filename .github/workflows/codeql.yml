@@ -45,7 +45,7 @@ jobs:
         with:
           persist-credentials: false
       # Runs before the analysis, so a gate that cannot fail is caught even on
-      # a clean scan. A sibling repository's identical gate passed for months
+      # a clean scan. Another repository's identical gate passed for months
       # with a jq program that did not compile.
       - name: Prove the gate can fail
         run: .github/codeql-gate.sh --self-test

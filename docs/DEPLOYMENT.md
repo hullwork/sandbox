@@ -3,9 +3,9 @@
 ## GitOps and OCI Helm package
 
 The product-owned chart in `charts/sandbox` is the portable deployment
-contract. It does not require an Infra repository and can be consumed directly
-by Helm, Argo CD, Flux, or another OCI-aware GitOps controller. Release tags
-publish it to `oci://ghcr.io/hullwork/charts/sandbox`.
+contract. It depends on nothing outside this repository: `helm install` it
+directly, or consume it from Argo CD, Flux, or another OCI-aware GitOps
+controller. Release tags publish it to `oci://ghcr.io/hullwork/charts/sandbox`.
 
 ```bash
 helm lint charts/sandbox
@@ -14,9 +14,10 @@ helm template sandbox charts/sandbox
 
 `values.schema.json` validates the public configuration surface. Every product
 image accepts an immutable `sha256:` digest; when set, the digest takes
-precedence over its tag. `package.yaml` declares portable requirements such as
-Kubernetes, PostgreSQL, S3, RWX storage, and gVisor. It is metadata for optional
-composition; Helm does not read it when this chart is installed directly.
+precedence over its tag. What the chart needs from the cluster - a PostgreSQL or
+MySQL database, S3-compatible object storage, an RWX StorageClass, and a gVisor
+RuntimeClass - is configured through `values.yaml` and described in the
+[Production guide](PRODUCTION.md).
 
 The existing Kustomize bases remain supported for source deployments. The Helm
 chart is the versioned package boundary for external GitOps composition.
@@ -147,7 +148,7 @@ before `kubectl apply`.
 | `sandbox-postgres` | Service (or ExternalName) | `sandbox-system` | Resolves to PostgreSQL on port 5432 |
 | `object-store-config` | ConfigMap | `sandbox-system` | Patch `endpoint`, the three bucket names, and `health-path` for your provider; the managed Ceph endpoint is `http://rook-ceph-rgw-object-store.rook-ceph.svc.cluster.local:80` |
 | `sandbox-rwx` | StorageClass | cluster | ReadWriteMany capable; `overlays/eks` substitutes the EFS class |
-| `gvisor` | RuntimeClass handler | cluster | `runsc` installed on every node labeled `sandbox.convee.io/node-role=runtime` |
+| `gvisor` | RuntimeClass handler | cluster | `runsc` installed on every node labeled `sandbox.hullwork.com/node-role=runtime` |
 
 The Helm chart names the database Secret with `postgresql.authSecret` (default
 `sandbox-postgres-auth`). That single value is used by the embedded PostgreSQL

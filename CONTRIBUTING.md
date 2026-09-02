@@ -23,10 +23,15 @@ make -n up-local
 Run the standalone tests and package smoke check before opening a pull request:
 
 ```bash
-python3 -m pip install -e '.[test]'
+python3 -m venv .venv
+.venv/bin/python -m pip install -e '.[test]'
 make test
-python3 -m pip wheel --no-deps . --wheel-dir /tmp/sandbox-wheel
+.venv/bin/python -m pip wheel --no-deps . --wheel-dir /tmp/sandbox-wheel
 ```
+
+`make test` prefers `.venv/bin/python` when it exists. Installing into the system
+interpreter fails on Debian, Ubuntu and Fedora with `externally-managed-environment`
+(PEP 668), so the virtual environment is the only path that works everywhere.
 
 Console checks:
 

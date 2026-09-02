@@ -119,7 +119,7 @@ RUNTIME_POD="$(
   kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
     --namespace sandbox-workloads \
     get pod \
-    --selector "convee.io/sandbox-id=${SANDBOX_ID}" \
+    --selector "sandbox.hullwork.com/sandbox-id=${SANDBOX_ID}" \
     --output=jsonpath='{.items[0].metadata.name}'
 )"
 RESTART_BEFORE="$(

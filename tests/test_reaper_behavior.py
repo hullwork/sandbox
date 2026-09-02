@@ -103,6 +103,10 @@ class WorkspaceOffline(RuntimeError):
     pass
 
 
+class ObjectStoreBusy(RuntimeError):
+    """Stands in for core.ObjectStoreBusy: retryable, and a RuntimeError subclass like the real one."""
+
+
 def pod(
     sandbox_id: str,
     *,
@@ -113,17 +117,17 @@ def pod(
 ) -> dict:
     labels = {
         "app.kubernetes.io/name": "sandbox-runtime",
-        "convee.io/sandbox-id": sandbox_id,
+        "sandbox.hullwork.com/sandbox-id": sandbox_id,
     }
     if workspace_id:
-        labels["convee.io/workspace-id"] = workspace_id
+        labels["sandbox.hullwork.com/workspace-id"] = workspace_id
     if tenant:
-        labels["convee.io/tenant"] = tenant
+        labels["sandbox.hullwork.com/tenant"] = tenant
     annotations = {}
     if expires_at is not None:
-        annotations["convee.io/expires-at"] = str(expires_at)
+        annotations["sandbox.hullwork.com/expires-at"] = str(expires_at)
     if hard_expires_at is not None:
-        annotations["convee.io/hard-expires-at"] = str(hard_expires_at)
+        annotations["sandbox.hullwork.com/hard-expires-at"] = str(hard_expires_at)
     return {
         "metadata": {
             "name": f"sandbox-{sandbox_id}",
@@ -145,17 +149,17 @@ def runtime_from_pod(item: dict) -> RuntimeInstance:
             return None
         return value if value > 0 else None
 
-    runtime_id = labels.get("convee.io/sandbox-id", "")
+    runtime_id = labels.get("sandbox.hullwork.com/sandbox-id", "")
     return RuntimeInstance(
         runtime_id=runtime_id,
-        workspace_id=labels.get("convee.io/workspace-id", ""),
+        workspace_id=labels.get("sandbox.hullwork.com/workspace-id", ""),
         provider_id=metadata.get("name", runtime_id),
         state="running",
         ready=True,
         isolation="gvisor",
-        tenant_id=labels.get("convee.io/tenant"),
-        expires_at=positive_int("convee.io/expires-at"),
-        hard_expires_at=positive_int("convee.io/hard-expires-at"),
+        tenant_id=labels.get("sandbox.hullwork.com/tenant"),
+        expires_at=positive_int("sandbox.hullwork.com/expires-at"),
+        hard_expires_at=positive_int("sandbox.hullwork.com/hard-expires-at"),
     )
 
 
@@ -168,6 +172,8 @@ def build_control_plane(kube: FakeKube, store: FakeStore | None, *, busy: set[st
     control_plane.WORKSPACE_IDLE_TTL_SECONDS = 86_400
     control_plane.WorkspaceOffline = WorkspaceOffline
     control_plane.RuntimeDriverError = RuntimeDriverError
+    control_plane.RuntimeDriverErrorCode = RuntimeDriverErrorCode
+    control_plane.ObjectStoreBusy = ObjectStoreBusy
     control_plane.touched: list[tuple[str, int]] = []
     control_plane.deleted_runtimes: list[str] = []
     control_plane.forgotten: list[str] = []
@@ -195,6 +201,17 @@ def build_control_plane(kube: FakeKube, store: FakeStore | None, *, busy: set[st
                 NAMESPACE,
                 "services",
                 control_plane.runtime_pod_name(sandbox_id),
+            )
+
+        def get_runtime(self, sandbox_id):
+            # The re-read before a TTL delete: answers from the Pods as they are
+            # *now*, which a test may have changed since the listing.
+            name = control_plane.runtime_pod_name(sandbox_id)
+            for item in kube.pods:
+                if item["metadata"]["name"] == name:
+                    return runtime_from_pod(item)
+            raise RuntimeDriverError(
+                RuntimeDriverErrorCode.NOT_FOUND, f"{sandbox_id} not found", status=404
             )
 
     runtime_driver = RuntimeDriver()
@@ -276,7 +293,7 @@ class TtlReapingTests(ReaperCase):
             pod("sb-zero", expires_at=0),
         ]
         pods.append(pod("sb-garbage", expires_at=NOW - 1))
-        pods[-1]["metadata"]["annotations"]["convee.io/expires-at"] = "soon"
+        pods[-1]["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = "soon"
         result, kube, control_plane = self.sweep(pods, store=None)
         self.assertEqual(result["runtimes"], 0)
         self.assertEqual(kube.deleted("pods"), [])
@@ -389,6 +406,68 @@ class ReconciliationTests(ReaperCase):
         self.assertEqual(control_plane.deleted_runtimes, ["sb-other"])
 
 
+class ReuseRaceTests(ReaperCase):
+    """A Runtime touched between the round's snapshot and its delete is spared.
+
+    ensure_runtime reuses an existing Runtime for a Workspace; when that Runtime
+    was already expired in the reaper's snapshot, the reaper's busy probe and
+    delete were racing the API's touch, and the client got a sandbox that was
+    deleted before its first MCP call. The reaper now re-reads expires-at right
+    before acting; a touch that landed since the snapshot counts as a reprieve.
+    """
+
+    def test_a_runtime_touched_after_the_snapshot_is_not_deleted(self) -> None:
+        class TouchedAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                snapshot = [json.loads(json.dumps(item)) for item in items]
+                # The API's touch lands after the listing was taken.
+                for item in self.pods:
+                    item["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = str(NOW + 1800)
+                return snapshot
+
+        kube = TouchedAfterListing([pod("sb-reused", expires_at=NOW - 1, workspace_id="ws-live")])
+        control_plane = build_control_plane(kube, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, [])
+        self.assertEqual(kube.deleted("pods"), [])
+        self.assertEqual(result["runtimes"], 0)
+        self.assertEqual(result["reprieved"], 1)
+        # Spared without the busy probe: the touch alone is the evidence.
+        self.assertEqual(control_plane.probed, [])
+
+    def test_a_runtime_already_gone_at_the_re_read_is_simply_skipped(self) -> None:
+        class GoneAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                self.pods = []
+                return items
+
+        kube = GoneAfterListing([pod("sb-gone", expires_at=NOW - 1)])
+        control_plane = build_control_plane(kube, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, [])
+        self.assertEqual(result["runtimes"], 0)
+
+    def test_the_hard_ceiling_is_not_subject_to_the_re_read(self) -> None:
+        class TouchedAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                snapshot = [json.loads(json.dumps(item)) for item in items]
+                for item in self.pods:
+                    item["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = str(NOW + 1800)
+                return snapshot
+
+        kube = TouchedAfterListing([pod("sb-old", expires_at=NOW - 1, hard_expires_at=NOW - 1)])
+        control_plane = build_control_plane(kube, None, busy={"sb-old"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, ["sb-old"])
+        self.assertEqual(result["runtimes"], 1)
+
+
 class WorkspaceSweepTests(ReaperCase):
     def test_workspace_sweep_failure_does_not_block_runtime_reaping(self) -> None:
         result, kube, control_plane = self.sweep([pod("sb-old", expires_at=NOW - 1)], None)
@@ -436,6 +515,163 @@ class WorkspaceSweepTests(ReaperCase):
         self.assertEqual(result["workspaces"], 1)
         self.assertEqual(removals, [("/v1/workspaces/ws-idle", {"remove": "1"}, 120)])
         self.assertEqual(control_plane.forgotten, ["ws-idle"])
+
+    def test_a_workspace_whose_runtime_died_this_round_is_not_swept(self) -> None:
+        """The round that deletes an expired Runtime must not also delete its Workspace.
+
+        Before this, delete-by-TTL did not add the Workspace to active_workspaces, and
+        the idle sweep in the same round read a column only admission had written: a
+        client that talked to its Runtime for hours lost the Workspace in the same 15s
+        round the Runtime hit the hard TTL. One round of grace; next round the store
+        column (refreshed by delete_runtime's touch) decides as usual."""
+        kube = FakeKube([
+            pod("sb-dead", expires_at=NOW - 1, workspace_id="ws-dying"),
+        ])
+        store = FakeStore()
+        store.idle_workspace_ids = ["ws-dying", "ws-idle"]
+        control_plane = build_control_plane(kube, store)
+        removals: list[str] = []
+
+        def volume_agent_request(method, path, query=None, timeout=None):
+            if method == "DELETE":
+                removals.append(path)
+                return 200, "{}", {}
+            raise AssertionError(f"unexpected volume request {method} {path}")
+
+        control_plane.volume_agent_request = volume_agent_request
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, ["sb-dead"])
+        self.assertEqual(result["runtimes"], 1)
+        self.assertEqual(removals, ["/v1/workspaces/ws-idle"])
+        self.assertEqual(control_plane.forgotten, ["ws-idle"])
+        self.assertEqual(result["workspaces"], 1)
+
+    def test_a_workspace_the_store_does_not_call_idle_is_never_swept(self) -> None:
+        """A recently touched Workspace is absent from idle_workspaces; the sweep has no
+        second opinion. The volume marker says "ancient" here and must not matter."""
+        kube = FakeKube([])
+        store = FakeStore()
+        store.idle_workspace_ids = []
+        control_plane = build_control_plane(kube, store)
+        removals: list[str] = []
+
+        def volume_agent_request(method, path, query=None, timeout=None):
+            if method == "GET" and path == "/v1/workspaces":
+                return 200, json.dumps({"workspaces": [
+                    {"id": "ws-touched", "last_used_at": NOW - 10 ** 6},
+                ]}), {}
+            if method == "DELETE":
+                removals.append(path)
+                return 200, "{}", {}
+            raise AssertionError(f"unexpected volume request {method} {path}")
+
+        control_plane.volume_agent_request = volume_agent_request
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(store.idle_calls, [control_plane.WORKSPACE_IDLE_TTL_SECONDS])
+        self.assertEqual(removals, [])
+        self.assertEqual(result["workspaces"], 0)
+
+
+class CheckpointSweepTests(ReaperCase):
+    """The checkpoint GC walks the bucket page by page and deletes as it goes.
+
+    It used to call object_list on the whole bucket, which refuses past
+    MAX_LIST_ENTRIES (10000). Once the bucket held more checkpoint objects than
+    that, every round raised before the first delete, and nothing else ever
+    removed them: the sweep stopped for good. Here the fake bucket holds more
+    than the ceiling, and the sweep must still delete every expired archive.
+    """
+
+    CEILING = 10_000
+    RETENTION = 3_600
+
+    def sweep_checkpoints(self, objects: list[dict], *, page_size: int = 1000) -> tuple[int, list[str], int]:
+        kube = FakeKube([])
+        control_plane = build_control_plane(kube, FakeStore())
+        control_plane.OBJECT_STORE_WORKSPACE_BUCKET = "workspaces"
+        control_plane.CHECKPOINT_RETENTION_SECONDS = self.RETENTION
+        control_plane.MAX_LIST_ENTRIES = self.CEILING
+        deleted: list[str] = []
+        pages_served = 0
+
+        def object_list(bucket, prefix):
+            raise AssertionError("the sweep must not list the whole bucket at once")
+
+        def object_list_page(bucket, prefix, *, continuation_token=None, page_size=page_size):
+            nonlocal pages_served
+            pages_served += 1
+            start = int(continuation_token or 0)
+            page = objects[start:start + page_size]
+            next_token = str(start + page_size) if start + page_size < len(objects) else None
+            return page, next_token
+
+        control_plane.object_list = object_list
+        control_plane.object_list_page = object_list_page
+        control_plane.object_delete_versions = lambda bucket, key: deleted.append(key)
+        reaper = load_reaper(control_plane)
+        removed = reaper.reap_expired_checkpoints(now=NOW)
+        return removed, deleted, pages_served
+
+    @staticmethod
+    def archive(index: int, *, age: int) -> dict:
+        from datetime import datetime, timezone
+        modified = datetime.fromtimestamp(NOW - age, tz=timezone.utc).isoformat()
+        return {
+            "key": f"workspaces/ws-{index:012x}/checkpoints/cp-{index}.tar.gz",
+            "bytes": 1,
+            "last_modified": modified,
+        }
+
+    def test_a_bucket_past_the_listing_ceiling_is_still_swept(self) -> None:
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(self.CEILING + 500)]
+        fresh = [self.archive(10 ** 6 + i, age=10) for i in range(3)]
+        other = [{"key": "workspaces/ws-000000000000/data/not-a-checkpoint.tar.gz",
+                  "bytes": 1, "last_modified": "2020-01-01T00:00:00+00:00"}]
+        removed, deleted, pages = self.sweep_checkpoints(expired + fresh + other)
+        self.assertEqual(removed, len(expired))
+        self.assertEqual(sorted(deleted), sorted(item["key"] for item in expired))
+        self.assertGreater(pages, 1, "the walk must be paged, not one listing")
+
+    def test_an_empty_bucket_is_one_page_and_no_deletes(self) -> None:
+        removed, deleted, pages = self.sweep_checkpoints([])
+        self.assertEqual((removed, deleted, pages), (0, [], 1))
+
+    def sweep_with_purge(self, purge, *, objects: list[dict]) -> tuple:
+        kube = FakeKube([])
+        control_plane = build_control_plane(kube, FakeStore())
+        control_plane.OBJECT_STORE_WORKSPACE_BUCKET = "workspaces"
+        control_plane.CHECKPOINT_RETENTION_SECONDS = self.RETENTION
+        plain: list[str] = []
+        control_plane.object_list_page = lambda bucket, prefix, *, continuation_token=None: (objects, None)
+        control_plane.object_delete_versions = purge
+        control_plane.object_delete = lambda bucket, key: plain.append(key)
+        reaper = load_reaper(control_plane)
+        with contextlib.redirect_stdout(io.StringIO()):
+            removed = reaper.reap_expired_checkpoints(now=NOW)
+        return removed, plain
+
+    def test_a_store_without_versioning_still_gets_its_checkpoints_swept(self) -> None:
+        """The versioned purge is rejected there; the sweep falls back to a plain delete
+        instead of stopping at its first expired object, as it did before."""
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(3)]
+
+        def rejected(bucket, key):
+            raise RuntimeError("object storage rejected the operation")
+
+        removed, plain = self.sweep_with_purge(rejected, objects=expired)
+        self.assertEqual(removed, 3)
+        self.assertEqual(plain, [item["key"] for item in expired])
+
+    def test_an_outage_during_the_sweep_is_not_papered_over(self) -> None:
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(3)]
+
+        def unreachable(bucket, key):
+            raise ObjectStoreBusy("object storage is unreachable; retry shortly")
+
+        with self.assertRaises(ObjectStoreBusy):
+            self.sweep_with_purge(unreachable, objects=expired)
 
 
 def load_admission_helpers(kube: FakeKube, *, ttl: int, idle_evict: int, now: float) -> dict:

@@ -1,6 +1,6 @@
 # Documentation index
 
-Sandbox Platform provides an execution-as-a-service boundary for agents: a Control Plane control plane, gVisor Runtime, workspace volume services, official Python SDK, and MCP bridge. Start with the [README](../README.md), then use the documents below.
+Sandbox Platform provides an execution-as-a-service boundary for agents: a Control Plane, gVisor Runtime, workspace volume services, official Python SDK, and MCP bridge. Start with the [README](../README.md), then use the documents below.
 
 | Document | Audience | Use it for |
 | --- | --- | --- |
@@ -11,6 +11,7 @@ Sandbox Platform provides an execution-as-a-service boundary for agents: a Contr
 | [Troubleshooting](TROUBLESHOOTING.md) | Operators and first-time users | Symptom, cause, check, and fix for common local-profile and credential failures |
 | [Authentication contract](AUTH.md) | Integrators and client authors | Sign-in methods, API key lifecycle, acting for a subject, errors, and what is stable |
 | [HTTP and SDK contract](API.md) | Integrators | Authentication groups, API areas, and SDK surface |
+| [Usage](USAGE.md) | SDK, CLI, MCP, and console users | The four client surfaces and the tasks that come up once something is running |
 | [System specifications](SYSTEM_SPECIFICATIONS.md) | Evaluators | Defaults, limits, storage modes, and unsupported capabilities |
 | [Reproducible benchmarks](BENCHMARKS.md) | Evaluators | Raw sample format, environment evidence, and predeclared excellent thresholds |
 | [Formal benchmark report (2026-09-01)](BENCHMARK_REPORT_2026-09-01.md) | Evaluators | Five-run measured results, evidence paths, test profile, and limitations |

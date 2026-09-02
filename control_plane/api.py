@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 from .store import (
     GLOBAL_TENANT,
+    MANAGEMENT_TENANT,
     WORKSPACE_AT_CAPACITY,
     ApiKey,
     StoreError,
@@ -96,6 +97,22 @@ class ApiHandler(BaseHTTPRequestHandler):
         self.request_started = time.monotonic()
         self.response_status = 500
         self.request_span = None
+        # 🔴 Identity is per request, never per connection. Every field the
+        # authentication path writes is reset here, so that under keep-alive
+        # (one handler instance, several requests) the second request cannot
+        # inherit the first one's tenant: require_control_plane_auth short-
+        # circuits on `authenticated`, and a reverse proxy that pools upstream
+        # connections would otherwise hand tenant A's identity to tenant B.
+        # Today protocol_version is HTTP/1.0, which closes after each
+        # response; this must not depend on that staying so.
+        self.authenticated = False
+        self.tenant_id = None
+        self.api_key = None
+        self.session_claims = None
+        self.acting_subject = None
+        self.scoped_claims = None
+        self.scoped_credential = False
+        self.object_owner = None
         try:
             super().handle_one_request()
         finally:
@@ -158,6 +175,27 @@ class ApiHandler(BaseHTTPRequestHandler):
         # Echoed so a caller can quote it in a bug report, and so a browser
         # devtools pane shows the same id the server logged.
         self.send_header(tracing.REQUEST_ID_HEADER, self.current_trace_id())
+
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Access log line without the query string.
+
+        🔴 The stdlib logs ``requestline`` verbatim, and the OIDC callback
+        arrives as ``GET /v1/auth/oidc/callback?code=...&state=...``: the
+        authorization code went into the process log on every sign-in. Only
+        the path is recorded; nothing in a query string is needed to read
+        the log, and credentials in it are the one thing that must not be.
+        """
+        if isinstance(code, HTTPStatus):
+            code = code.value
+        path = urlparse(getattr(self, "path", "") or "").path
+        self.log_message(
+            '"%s %s %s" %s %s',
+            getattr(self, "command", "?") or "?",
+            path,
+            getattr(self, "request_version", ""),
+            str(code),
+            str(size),
+        )
 
     def log_message(self, fmt: str, *args: object) -> None:
         print(
@@ -429,6 +467,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not tenant_id:
             self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+        if tenant_id == MANAGEMENT_TENANT:
+            # The reserved row is never a tenant anyone represents: neither a
+            # session whose tenant claim says so, nor an admin key naming it in
+            # X-Sandbox-Tenant. Representing it would hand out the management
+            # plane's own workspaces and runtimes as if they were a tenant's.
+            self.send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": f"tenant id is reserved: {tenant_id}"},
+            )
+            return False
         if control_plane.STORE is None:
             #Without storage, there is no concept of tenants; specifying a tenant is a configuration error, and it should be stated clearly rather than silently.
             #Single tenant processing.
@@ -508,7 +556,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    MANAGEMENT_TENANT = "management"
+    MANAGEMENT_TENANT = MANAGEMENT_TENANT
+
+    def reject_reserved_tenant(self, tenant_id: str) -> bool:
+        """403 for admin routes that would suspend or delete the reserved row.
+
+        Suspending ``management`` suspends every workspace and runtime the
+        management plane itself created (scoped tokens re-check the tenant's
+        status), and there is no credential that could act for it afterwards
+        to undo the mistake. Returns False when a response has been sent.
+        """
+        if tenant_id != MANAGEMENT_TENANT:
+            return True
+        self.send_json(
+            HTTPStatus.FORBIDDEN,
+            {"error": f"tenant id is reserved: {tenant_id}"},
+        )
+        return False
 
     def ensure_management_tenant(self) -> str:
         """The reserved tenant the unscoped management identity is filed under.
@@ -528,12 +592,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         """
         if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
             try:
-                control_plane.STORE.create_tenant(
-                    self.MANAGEMENT_TENANT,
-                    "Reserved management-plane identity",
-                    max_workspaces=1024,
-                    max_runtimes=1024,
-                )
+                # Not create_tenant: that one refuses the reserved name so no
+                # caller can register it; this is the internal entry.
+                control_plane.STORE.create_management_tenant()
             except Exception:
                 if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
                     raise
@@ -642,6 +703,21 @@ class ApiHandler(BaseHTTPRequestHandler):
                 HTTPStatus.NOT_FOUND, f"unknown tenant: {tenant_id}"
             )
         return tenant.max_runtimes
+
+    @staticmethod
+    def quota_field(payload: dict, name: str, default: int) -> int:
+        """An integer quota from an admin request body, or 400.
+
+        🔴 Not ``int(payload.get(...))``: ``int(None)`` and ``int([])`` raise
+        TypeError, which the dispatcher does not translate, so a body with
+        ``"max_workspaces": null`` killed the handler thread and the client
+        saw the connection drop rather than an answer. ``int(True)`` is 1,
+        which is a quota nobody asked for.
+        """
+        value = payload.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be an integer")
+        return value
 
     def require_admin(self) -> bool:
         """Management plane operations: create tenants and issue keys.
@@ -765,7 +841,23 @@ class ApiHandler(BaseHTTPRequestHandler):
             return
         body = b""
         if self.command == "POST":
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                # Outside the dispatcher's try: an unparseable header used to
+                # kill the thread. A negative length would make rfile.read
+                # wait for EOF instead.
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
+            if length < 0:
+                self.send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "Content-Length must be an integer"},
+                )
+                return
             if length > grafana_proxy.MAX_REQUEST_BYTES:
                 self.send_json(
                     HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
@@ -845,10 +937,19 @@ class ApiHandler(BaseHTTPRequestHandler):
            Use indicators + logs to make the fact that "auditing is failing" itself observable."""
         if control_plane.STORE is None:
             return
+        actor_kind = self.credential_kind()
+        actor_id = self.actor_id()
+        if outcome == "denied" and not control_plane.DENIED_AUDITS.admit(
+            (actor_kind, actor_id, action, target)
+        ):
+            # The same actor was already recorded probing the same target within
+            # the window; a repeat adds no signal and unbounded repeats fill the
+            # table (see DenialThrottle).
+            return
         try:
             control_plane.STORE.record_audit(
-                actor_kind=self.credential_kind(),
-                actor_id=self.actor_id(),
+                actor_kind=actor_kind,
+                actor_id=actor_id,
                 action=action,
                 target=target,
                 outcome=outcome,
@@ -1081,7 +1182,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def scope_workspaces(
         self, entries: list[dict]
-    ) -> tuple[list[dict], dict[str, str]]:
+    ) -> tuple[list[dict], dict[str, str], dict[str, str]]:
         """Converge the Workspaces listed on the volume to the range visible for this request.
 
         🔴 This is where the current overreach stops. The volume is a directory of all tenants. Without filtering, it is equal to any
@@ -1089,18 +1190,26 @@ class ApiHandler(BaseHTTPRequestHandler):
         entrance.
 
         The management plane (tenant_id is None) looks at all, and also brings ownership; tenants only look at their own.
-        When STORE is not configured, it degrades to single tenant and behaves the same as before."""
+        When STORE is not configured, it degrades to single tenant and behaves the same as before.
+
+        The third value is the store's last_used_at per Workspace - the clock the reaper actually runs
+        (see workspace_view's recorded_last_used_at); it is returned for every visible Workspace."""
         if control_plane.STORE is None:
-            return entries, {}
+            return entries, {}, {}
         owned = control_plane.STORE.list_workspaces(self.tenant_id)
         owners = {row["workspace_id"]: row["tenant_id"] for row in owned}
+        recorded = {
+            row["workspace_id"]: row["last_used_at"]
+            for row in owned
+            if row.get("last_used_at")
+        }
         if self.tenant_id is None:
             #Only global views return ownership. When representing a tenant, the column is always equal to itself.
             #It would be better not to give one extra column for nothing.
-            return entries, owners
+            return entries, owners, recorded
         # Directories without an ownership row in the store are invisible to tenants. They are either pre-multi-tenant stock
         #(the migration script will claim it), or it has been manually stuffed into the volume - neither of which should be visible to tenants.
-        return [e for e in entries if e.get("id") in owners], {}
+        return [e for e in entries if e.get("id") in owners], {}, recorded
 
     def scope_sandboxes(self, runtimes: list[control_plane.RuntimeInstance]) -> list[dict]:
         """Runtimes converge according to their Workspace ownership.
@@ -1588,11 +1697,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise ValueError("object exceeds ticket size limit")
         digest = hashlib.sha256()
-        with tempfile.SpooledTemporaryFile(
-            max_size=1024 * 1024,
-            mode="w+b",
-            dir="/tmp",
-        ) as upload:
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(control_plane.object_queue_slot())
+            except control_plane.ObjectStoreBusy:
+                # Refused before the first body byte: nothing is spooled, and
+                # the unread body means this connection cannot be reused.
+                self.close_connection = True
+                raise
+            upload = stack.enter_context(
+                tempfile.SpooledTemporaryFile(
+                    max_size=1024 * 1024,
+                    mode="w+b",
+                    dir="/tmp",
+                )
+            )
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(1024 * 1024, remaining))
@@ -1832,24 +1951,31 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"status": "ready"})
             return
         if path == "/metrics":
-            #Same level as /healthz: No authentication required, NetworkPolicy determines who can be caught.
-            #The indicator does not contain any tenant identification, see the description at METRICS.
+            # Same footing as /healthz: no authentication, NetworkPolicy decides
+            # who can scrape it. The metrics carry no tenant identity; see the
+            # note at METRICS.
             self.send_bytes(
                 HTTPStatus.OK, control_plane.METRICS.render(), metrics_lib.CONTENT_TYPE
             )
             return
         if path == "/healthz":
-            #Depends on the health check, not the readiness probe - readiness is /readyz. Here we explore the downstream areas one by one,
-            #Either failure is non-200, and the criteria are intentionally stricter than /readyz: its consumers are people and deployments
-            #Deployment verification and sandbox_client connectivity probes
-            #Connectivity self-test, the price of red reporting is "a certain step failed", not "the only copy was removed"
-            #"Loss of flow". The same check is hung on different gates, and the explosion radius differs by an order of magnitude.
-            #🔴 Don’t point kubelet’s readinessProbe back here – that’s what was fixed this time
-            #That article: The object storage was shaken, and even the exec/list/release of the sandbox that was already running was broken.
+            # A dependency health check, not the readiness probe - readiness is
+            # /readyz. This walks every downstream dependency in turn and any
+            # failure is a non-200. It is deliberately stricter than /readyz
+            # because its consumers are people, deployment verification and the
+            # sandbox_client connectivity self-test: a red here costs "one step
+            # failed", not "the only replica was pulled out of the Service".
+            # The same check wired to a different gate has a blast radius an
+            # order of magnitude larger.
+            # 🔴 Never point kubelet's readinessProbe back at this path. That
+            # was the incident this fixed: the object store blipped, and even
+            # exec/list/release on sandboxes that were already running broke.
             if control_plane._SHUTTING_DOWN.is_set():
-                #Even if you close this item in the layout, you still have to report 503: The physical examination should also truthfully say "This copy is being withdrawn."
-                #livez does not follow the change: it is a survival probe, and failure will cause a kubelet restart.
-                #And we're about to exit normally.
+                # Report 503 even though no probe is wired to this path: a health
+                # check must say truthfully that this replica is being withdrawn.
+                # /livez does not follow suit: it is the liveness probe, its
+                # failure makes kubelet restart the Pod, and we are about to
+                # exit cleanly on our own.
                 self.send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     {"status": "shutting down"},
@@ -2001,6 +2127,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.list_workspace_checkpoints(workspace_id),
@@ -2017,6 +2144,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 #The write subset (write|write-binary|edit in do_POST) does not move.
                 if not self.require_workspace_read_auth(workspace_id):
                     return
+                # After the gate, before the side effect: an unowned id must
+                # not refresh anyone's idle clock.
+                control_plane.touch_workspace(workspace_id)
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 self.proxy_workspace(
                     "GET",
@@ -2145,7 +2275,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 _, listing, _ = control_plane.volume_agent_request("GET", "/v1/workspaces")
                 entries = json.loads(listing).get("workspaces", [])
                 try:
-                    entries, owners = self.scope_workspaces(entries)
+                    entries, owners, recorded = self.scope_workspaces(entries)
                 except StoreError as exc:
                     self.send_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -2160,6 +2290,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                                 entry,
                                 entry.get("id") in attached,
                                 tenant_id=owners.get(entry.get("id")),
+                                recorded_last_used_at=recorded.get(entry.get("id")),
                             )
                             for entry in entries
                         ]
@@ -2212,6 +2343,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # ObjectNotFound: the store said "no such object". An OSError, so it
+            # must be caught ahead of the 400 catch-all below.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2270,6 +2405,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.CREATED,
                     control_plane.checkpoint_workspace(workspace_id),
@@ -2286,6 +2422,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, checkpoint_id = match.groups()
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 payload = self.read_json()
                 self.send_json(
                     HTTPStatus.OK,
@@ -2304,9 +2441,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
-                #The active time is written on the volume by the file-service's record_activity
-                #.sandbox/last_used_at, Control Plane will not be recorded again - Workspace has been
-                #There are no Pods available for patch annotation.
+                # The volume marker (.sandbox/last_used_at) is file-service's; the
+                # reaper's clock is the store column, refreshed here.
+                control_plane.touch_workspace(workspace_id)
                 payload = control_plane.bind_object_owner(
                     self.read_json(),
                     control_plane.scoped_object_owner(self.scoped_claims),
@@ -2358,9 +2495,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
-                #The active time is written on the volume by the file-service's record_activity
-                #.sandbox/last_used_at, Control Plane will not be recorded again - Workspace has been
-                #There are no Pods available for patch annotation.
+                # See objects/import: the store column is the reaper's clock.
+                control_plane.touch_workspace(workspace_id)
                 payload = control_plane.bind_object_owner(
                     self.read_json(),
                     control_plane.scoped_object_owner(self.scoped_claims),
@@ -2428,14 +2564,18 @@ class ApiHandler(BaseHTTPRequestHandler):
                 display_name = payload.get("display_name") or tenant_id
                 if not isinstance(display_name, str) or len(display_name) > 128:
                     raise ValueError("display_name must be a string up to 128 chars")
+                max_workspaces = self.quota_field(
+                    payload, "max_workspaces", control_plane.MAX_WORKSPACES
+                )
+                max_runtimes = self.quota_field(
+                    payload, "max_runtimes", control_plane.MAX_RUNTIMES
+                )
                 try:
                     tenant = control_plane.STORE.create_tenant(
                         tenant_id,
                         display_name,
-                        max_workspaces=int(
-                            payload.get("max_workspaces", control_plane.MAX_WORKSPACES)
-                        ),
-                        max_runtimes=int(payload.get("max_runtimes", control_plane.MAX_RUNTIMES)),
+                        max_workspaces=max_workspaces,
+                        max_runtimes=max_runtimes,
                     )
                 except StoreError as exc:
                     # A duplicate tenant id lands here. Return 409 instead of 500: the caller must be able to tell "my request was wrong"
@@ -2543,6 +2683,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not self.require_admin():
                     return
                 tenant_id = match.group(1)
+                if not self.reject_reserved_tenant(tenant_id):
+                    return
                 status = self.read_json().get("status")
                 #Block illegal values here instead of waiting for the store to throw StoreError: that exception has been
                 # reported at the end of do_POST as a "store unavailable" 503, but "you sent an unrecognized
@@ -2824,7 +2966,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         sandbox_id,
                         workspace_id,
                         template_id,
-                        self.tenant_id or "management",
+                        self.tenant_id or MANAGEMENT_TENANT,
                         limit,
                     )
                     view = control_plane.sandbox_view(pod)
@@ -2852,7 +2994,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     sandbox_id,
                     workspace_id,
                     template_id,
-                    self.tenant_id or "management",
+                    self.tenant_id or MANAGEMENT_TENANT,
                     limit,
                 )
                 self.send_json(
@@ -2902,6 +3044,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, operation = match.groups()
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.proxy_workspace(
                     "POST",
                     workspace_id,
@@ -2932,6 +3075,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # See do_GET: ObjectNotFound, ahead of the OSError catch-all.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2959,6 +3105,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(exc.status, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2991,6 +3139,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, checkpoint_id = match.groups()
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.delete_workspace_checkpoint(workspace_id, checkpoint_id),
@@ -3087,6 +3236,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             )
             if match:
                 if not self.require_admin():
+                    return
+                if not self.reject_reserved_tenant(match.group(1)):
                     return
                 #Deactivate rather than delete: The Workspace under the tenant is still on the volume, directly deleting the record will cause
                 #Those directories become unowned. The data is left for disposal.
@@ -3187,5 +3338,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

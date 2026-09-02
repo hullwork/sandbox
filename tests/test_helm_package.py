@@ -28,10 +28,17 @@ class HelmPackageContractTests(unittest.TestCase):
             current[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         self.assertEqual(current, recorded, "canonical manifests changed; update the Helm templates and checksum gate together")
 
-    def test_chart_is_product_owned_and_declares_portable_capabilities(self) -> None:
+    def test_chart_is_product_owned_and_standalone(self) -> None:
         chart = yaml.safe_load((CHART / "Chart.yaml").read_text(encoding="utf-8"))
-        metadata = yaml.safe_load((CHART / "package.yaml").read_text(encoding="utf-8"))
         project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        # package.yaml was a Package descriptor for a separate infrastructure
+        # repository's composition tooling. This chart is published on its own,
+        # so the descriptor and its release-time checksum are gone.
+        self.assertFalse((CHART / "package.yaml").exists())
+        self.assertNotIn(
+            "package.yaml",
+            (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"),
+        )
         self.assertEqual(chart["name"], "sandbox")
         self.assertEqual(chart["version"], project["project"]["version"])
         self.assertEqual(chart["appVersion"], project["project"]["version"])
@@ -41,10 +48,6 @@ class HelmPackageContractTests(unittest.TestCase):
         self.assertEqual("MIT", chart["annotations"]["artifacthub.io/license"])
         self.assertEqual("MIT", project["project"]["license"])
         self.assertEqual("MIT License", (ROOT / "LICENSE").read_text().splitlines()[0])
-        self.assertEqual(metadata["apiVersion"], "infra.convee.io/v1alpha1")
-        self.assertEqual(metadata["spec"]["source"]["renderer"], "helm")
-        self.assertIn("kubernetes.api", metadata["spec"]["capabilities"]["requires"])
-        self.assertIn("object-storage.s3", metadata["spec"]["capabilities"]["requires"])
 
     def test_values_schema_supports_digest_pinned_images(self) -> None:
         schema = json.loads((CHART / "values.schema.json").read_text(encoding="utf-8"))
@@ -139,9 +142,9 @@ class HelmPackageContractTests(unittest.TestCase):
         rendered = subprocess.run(
             [
                 "helm", "template", "sandbox", str(CHART),
-                "--set-string", "scheduling.system.nodeSelector.infra\\.convee\\.io/node-role=system",
-                "--set-string", "runtime.nodeSelector.sandbox\\.convee\\.io/node-role=runtime",
-                "--set-string", "runtime.tolerations[0].key=sandbox.convee.io/node-role",
+                "--set-string", "scheduling.system.nodeSelector.example\\.com/node-role=system",
+                "--set-string", "runtime.nodeSelector.sandbox\\.hullwork\\.com/node-role=runtime",
+                "--set-string", "runtime.tolerations[0].key=sandbox.hullwork.com/node-role",
                 "--set-string", "runtime.tolerations[0].operator=Equal",
                 "--set-string", "runtime.tolerations[0].value=runtime",
                 "--set-string", "runtime.tolerations[0].effect=NoSchedule",
@@ -162,7 +165,7 @@ class HelmPackageContractTests(unittest.TestCase):
             else:
                 pod = spec["template"]["spec"]
             self.assertEqual(
-                pod["nodeSelector"], {"infra.convee.io/node-role": "system"},
+                pod["nodeSelector"], {"example.com/node-role": "system"},
                 item["metadata"]["name"],
             )
         control_plane = next(
@@ -175,7 +178,7 @@ class HelmPackageContractTests(unittest.TestCase):
         }
         self.assertEqual(
             env["SANDBOX_RUNTIME_NODE_SELECTOR"],
-            "sandbox.convee.io/node-role=runtime",
+            "sandbox.hullwork.com/node-role=runtime",
         )
         self.assertEqual(
             json.loads(env["SANDBOX_RUNTIME_TOLERATIONS"])[0]["effect"],

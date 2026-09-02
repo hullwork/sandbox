@@ -171,11 +171,36 @@ def cmd_templates(args: argparse.Namespace) -> int:
     return 0
 
 
+def _confirm_release(sandbox_id: str) -> bool:
+    """Ask on the terminal; without one, insist on ``--yes``.
+
+    The token behind this tool releases any tenant's Runtime, so a mistyped
+    id is somebody else's running command gone. A script that means it says
+    so with the flag; a human gets one question, on stderr so ``--json``
+    output stays parseable."""
+    if not sys.stdin.isatty():
+        print(
+            "error: release is destructive; pass --yes when stdin is not a terminal",
+            file=sys.stderr,
+        )
+        return False
+    sys.stderr.write(
+        f"release runtime {sandbox_id}? its running command dies with the Pod [y/N] "
+    )
+    sys.stderr.flush()
+    if sys.stdin.readline().strip().lower() in {"y", "yes"}:
+        return True
+    print("aborted", file=sys.stderr)
+    return False
+
+
 def cmd_release(args: argparse.Namespace) -> int:
     """Release the Runtime and keep the Workspace.
 
     Constraint: This is a **destructive** operation, and the running command will disappear along with the Pod. Workspace and
          Files in /workspace are not affected - this is the meaning of dual life cycle separation."""
+    if not args.yes and not _confirm_release(args.sandbox_id):
+        return 2
     result = request(
         "DELETE", f"/v1/sandboxes/{urllib.parse.quote(args.sandbox_id)}"
     )
@@ -245,6 +270,9 @@ def build_parser() -> argparse.ArgumentParser:
         "release", help="release a runtime while retaining its workspace and files"
     )
     p_release.add_argument("sandbox_id")
+    p_release.add_argument(
+        "--yes", action="store_true", help="release without asking (required when stdin is not a terminal)"
+    )
     p_release.set_defaults(func=cmd_release)
 
     p_keys = sub.add_parser("admin-keys", help="list admin API keys")

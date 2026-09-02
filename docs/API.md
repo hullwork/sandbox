@@ -53,7 +53,7 @@ header: they express the caller's sampling decision, and a hop that overwrote
 them would be reversing a decision someone else made, invisibly. Control Plane chooses
 flags (`01`) only for a trace it starts itself, where no decision exists yet.
 
-🔴 A malformed `traceparent` never fails a request. It is treated as absent and
+Constraint: a malformed `traceparent` never fails a request. It is treated as absent and
 the next source applies. Tracing is a diagnostic aid; a request that failed
 because its trace header was wrong would make the diagnostic layer an outage
 source.
@@ -66,9 +66,9 @@ half: **a receiver must match the name case-insensitively.** If you are
 comparing a packet capture against the lowercase spelling used in the
 specification, this is why they differ, and it is not a defect.
 
-Known gap: object-storage traffic leaves through the `mc` command-line client,
-which offers no place to inject a header. That hop carries no `traceparent`, so
-a trace stops at the object-store boundary rather than continuing through it.
+Known gap: object-storage traffic leaves through `boto3`, which
+does not yet propagate `traceparent`. That hop is not traced yet, so a trace
+stops at the object-store boundary rather than continuing through it.
 
 ## Routes
 

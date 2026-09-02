@@ -23,37 +23,65 @@ __all__ = (
 
 
 def reap_expired_checkpoints(now: int | None = None) -> int:
+    """Delete every checkpoint archive older than CHECKPOINT_RETENTION_SECONDS, one page at a time.
+
+    🔴 Page, judge, delete, next page - never list the bucket first. object_list refuses past
+       MAX_LIST_ENTRIES, and a bucket that had grown past it made every round raise before the first
+       delete: the only thing that shrinks the bucket had stopped, permanently, with an error line an
+       hour apart as the sole symptom. Memory here is one page, whatever the bucket holds."""
     current = now or int(time.time())
     prefix = "workspaces/"
-    listed = control_plane.object_list(
-        control_plane.OBJECT_STORE_WORKSPACE_BUCKET, prefix
-    )
     removed = 0
-    for item in listed:
-        try:
-            listed_key = str(item.get("key") or "")
-            key = (
-                listed_key
-                if listed_key.startswith(prefix)
-                else f"{prefix}{listed_key}"
-            )
-            modified = str(item.get("last_modified") or "")
-            modified_at = int(
-                datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
-            )
-        except (ValueError, TypeError):
-            continue
-        if (
-            "/checkpoints/" not in key
-            or not key.endswith(".tar.gz")
-            or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
-        ):
-            continue
-        control_plane.object_delete_versions(
-            control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+    token: str | None = None
+    while True:
+        items, token = control_plane.object_list_page(
+            control_plane.OBJECT_STORE_WORKSPACE_BUCKET,
+            prefix,
+            continuation_token=token,
         )
-        removed += 1
-    return removed
+        for item in items:
+            try:
+                listed_key = str(item.get("key") or "")
+                key = (
+                    listed_key
+                    if listed_key.startswith(prefix)
+                    else f"{prefix}{listed_key}"
+                )
+                modified = str(item.get("last_modified") or "")
+                modified_at = int(
+                    datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
+                )
+            except (ValueError, TypeError):
+                continue
+            if (
+                "/checkpoints/" not in key
+                or not key.endswith(".tar.gz")
+                or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
+            ):
+                continue
+            try:
+                control_plane.object_delete_versions(
+                    control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+                )
+            except control_plane.ObjectStoreBusy:
+                # An outage is not "no versioning here"; let the round fail and
+                # come back next hour rather than paper over it with a plain delete.
+                raise
+            except RuntimeError as exc:
+                # Same fallback as delete_workspace_checkpoint: a store without
+                # versioning rejects the versioned purge, and without this the
+                # sweep stopped at its first expired object on such stores.
+                print(
+                    f"[reaper] {key}: versioned purge rejected ({exc}); "
+                    "deleting the current version only",
+                    flush=True,
+                )
+                control_plane.object_delete(
+                    control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+                )
+            removed += 1
+        if not token:
+            return removed
 
 
 def reap_once(now: int | None = None) -> dict[str, int]:
@@ -61,6 +89,12 @@ def reap_once(now: int | None = None) -> dict[str, int]:
     runtime_driver = control_plane.configured_runtime_driver()
     runtimes = runtime_driver.list_runtimes()
     active_workspaces: set[str] = set()
+    # Workspaces whose Runtime this round deleted. They get one round of grace from
+    # the idle sweep below: delete_runtime touches the store column, but that touch
+    # is throttled and may not land, and a Workspace whose only activity went through
+    # its Runtime would otherwise be swept in the very same 15s round its Runtime
+    # died - hours of work gone while the user was active minutes earlier.
+    released_workspaces: set[str] = set()
     removed_runtimes = 0
     reprieved_runtimes = 0
     # Reconciliation must use the Runtimes still alive after this round's scan, not the batch fetched at the start -
@@ -83,6 +117,27 @@ def reap_once(now: int | None = None) -> dict[str, int]:
             over_hard_limit = bool(
                 hard_expires_at and hard_expires_at <= current
             )
+            if not over_hard_limit:
+                # 🔴 Re-read before acting. The verdict above came from the snapshot at the start of the
+                # round; ensure_runtime may have reused and touched this Runtime since (it does so for an
+                # expired candidate precisely so this check sees it). Deleting on the stale snapshot handed
+                # a client a sandbox that vanished before its first MCP call. "Not found" means someone
+                # else already deleted it; any other driver failure leaves it for next round rather than
+                # deleting on data known to be stale.
+                try:
+                    latest = runtime_driver.get_runtime(sandbox_id)
+                except control_plane.RuntimeDriverError as exc:
+                    if exc.code != control_plane.RuntimeDriverErrorCode.NOT_FOUND:
+                        print(f"[reaper] {sandbox_id} re-read failed, kept this round: {exc}", flush=True)
+                        if workspace_id:
+                            active_workspaces.add(workspace_id)
+                    continue
+                if latest.expires_at and latest.expires_at > current:
+                    # Touched since the snapshot: treated exactly like a busy reprieve.
+                    reprieved_runtimes += 1
+                    if workspace_id:
+                        active_workspaces.add(workspace_id)
+                    continue
             if not over_hard_limit and control_plane.probe_runtime_busy(sandbox_id):
                 control_plane.touch_runtime(sandbox_id, current)
                 reprieved_runtimes += 1
@@ -91,6 +146,8 @@ def reap_once(now: int | None = None) -> dict[str, int]:
                 continue
             control_plane.delete_runtime(sandbox_id)
             removed_runtimes += 1
+            if workspace_id:
+                released_workspaces.add(workspace_id)
             continue
         elif workspace_id:
             active_workspaces.add(workspace_id)
@@ -190,20 +247,25 @@ def reap_once(now: int | None = None) -> dict[str, int]:
         print(f"[reaper] workspace sweep skipped: {exc}", flush=True)
         candidates = []
     for workspace_id in candidates:
-        if workspace_id and workspace_id not in active_workspaces:
-            try:
-                control_plane.volume_agent_request(
-                    "DELETE",
-                    f"/v1/workspaces/{workspace_id}",
-                    query={"remove": "1"},
-                    timeout=120,
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                print(f"[reaper] {workspace_id} remove failed: {exc}", flush=True)
-                continue
-            # Deleting the data must also write off the row, otherwise the quota leaks permanently - see forget_workspace_row.
-            control_plane.forget_workspace_row(workspace_id)
-            removed_workspaces += 1
+        if not workspace_id or workspace_id in active_workspaces:
+            continue
+        if workspace_id in released_workspaces:
+            # Its Runtime died this round; the idle clock starts now, not in the past.
+            # Next round the store column decides as usual.
+            continue
+        try:
+            control_plane.volume_agent_request(
+                "DELETE",
+                f"/v1/workspaces/{workspace_id}",
+                query={"remove": "1"},
+                timeout=120,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"[reaper] {workspace_id} remove failed: {exc}", flush=True)
+            continue
+        # Deleting the data must also write off the row, otherwise the quota leaks permanently - see forget_workspace_row.
+        control_plane.forget_workspace_row(workspace_id)
+        removed_workspaces += 1
     return {
         "runtimes": removed_runtimes,
         "workspaces": removed_workspaces,
@@ -234,7 +296,7 @@ def reap_expired_ticket_leases(now: int | None = None) -> int:
         metadata = lease.get("metadata", {})
         annotations = metadata.get("annotations", {})
         try:
-            expires_at = int(annotations.get("convee.io/expires-at", "0"))
+            expires_at = int(annotations.get("sandbox.hullwork.com/expires-at", "0"))
         except (TypeError, ValueError):
             continue
         name = metadata.get("name")

@@ -13,9 +13,9 @@ spec:
     spec:
  # Volume back to node binding (local-path), the volume role must be on the same node as Runtime.
       nodeSelector:
-        sandbox.convee.io/node-role: runtime
+        sandbox.hullwork.com/node-role: runtime
       tolerations:
-        - key: sandbox.convee.io/node-role
+        - key: sandbox.hullwork.com/node-role
           operator: Equal
           value: runtime
           effect: NoSchedule

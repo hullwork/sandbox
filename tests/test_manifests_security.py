@@ -23,9 +23,9 @@ from control_plane.manifests import (  # noqa: E402
 SANDBOX_ID = "sb-0123456789ab"
 WORKSPACE_ID = "ws-aaaaaaaaaaaa"
 TENANT = "acme"
-SELECTOR = {"convee.io/runtime-node": "true"}
+SELECTOR = {"sandbox.hullwork.com/runtime-node": "true"}
 TOLERATIONS = ({
-    "key": "convee.io/runtime-node",
+    "key": "sandbox.hullwork.com/runtime-node",
     "operator": "Equal",
     "value": "true",
     "effect": "NoSchedule",
@@ -130,7 +130,7 @@ class RuntimePodSecurityTests(unittest.TestCase):
             self.spec["tolerations"],
             [
                 {
-                    "key": "convee.io/runtime-node",
+                    "key": "sandbox.hullwork.com/runtime-node",
                     "operator": "Equal",
                     "value": "true",
                     "effect": "NoSchedule",
@@ -151,23 +151,23 @@ class RuntimePodSecurityTests(unittest.TestCase):
 
     def test_pod_carries_identity_labels_and_tenant(self) -> None:
         labels = self.manifest["metadata"]["labels"]
-        self.assertEqual(labels["convee.io/tenant"], TENANT)
-        self.assertEqual(labels["convee.io/sandbox-id"], SANDBOX_ID)
-        self.assertEqual(labels["convee.io/workspace-id"], WORKSPACE_ID)
-        self.assertEqual(labels["convee.io/template"], "default")
+        self.assertEqual(labels["sandbox.hullwork.com/tenant"], TENANT)
+        self.assertEqual(labels["sandbox.hullwork.com/sandbox-id"], SANDBOX_ID)
+        self.assertEqual(labels["sandbox.hullwork.com/workspace-id"], WORKSPACE_ID)
+        self.assertEqual(labels["sandbox.hullwork.com/template"], "default")
         self.assertEqual(labels["app.kubernetes.io/name"], "sandbox-runtime")
         self.assertEqual(self.manifest["metadata"]["name"], f"sandbox-{SANDBOX_ID}")
         self.assertEqual(self.manifest["metadata"]["namespace"], "sandbox-workloads")
 
     def test_single_tenant_pod_has_no_tenant_label(self) -> None:
         manifest = runtime_pod_manifest(settings(), SANDBOX_ID, WORKSPACE_ID)
-        self.assertNotIn("convee.io/tenant", manifest["metadata"]["labels"])
+        self.assertNotIn("sandbox.hullwork.com/tenant", manifest["metadata"]["labels"])
 
     def test_expiry_annotations_follow_the_ttl_settings(self) -> None:
         annotations = self.manifest["metadata"]["annotations"]
-        created = int(annotations["convee.io/created-at"])
-        self.assertEqual(int(annotations["convee.io/expires-at"]), created + 1800)
-        self.assertEqual(int(annotations["convee.io/hard-expires-at"]), created + 7200)
+        created = int(annotations["sandbox.hullwork.com/created-at"])
+        self.assertEqual(int(annotations["sandbox.hullwork.com/expires-at"]), created + 1800)
+        self.assertEqual(int(annotations["sandbox.hullwork.com/hard-expires-at"]), created + 7200)
 
     def test_images_come_from_the_template_registry_only(self) -> None:
         for container in all_containers(self.manifest):

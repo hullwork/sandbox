@@ -66,10 +66,13 @@ class Paginator:
 
 
 class Fake:
-    def __init__(self, body=b"", pages=None, version_pages=None, declared=None):
+    def __init__(self, body=b"", pages=None, version_pages=None, declared=None, omit_length=False):
         self.calls = []
         self.body = body
         self.declared = declared
+        # A response with no ContentLength at all (a chunked body), as opposed
+        # to one that declares more than it sends.
+        self.omit_length = omit_length
         self.pages = pages or [{}]
         self.version_pages = version_pages or [{}]
     def get_object(self, **kwargs):
@@ -78,6 +81,8 @@ class Fake:
         # against what it actually read. `declared` lets a case send fewer
         # bytes than it promises.
         declared = self.declared if self.declared is not None else len(self.body)
+        if self.omit_length:
+            return {"Body": Body(self.body)}
         return {"Body": Body(self.body), "ContentLength": declared}
     def head_object(self, **kwargs):
         self.calls.append(("head_object", kwargs))
@@ -286,24 +291,86 @@ store = Fake(version_pages=[{
 }])
 core.object_store = lambda: store
 core.object_delete_versions("b", "k")
-versioned = [c for c in store.calls if c[0] == "delete_objects"]
+versioned = [c[1] for c in store.calls if c[0] == "delete_object"]
+batched = [c for c in store.calls if c[0] == "delete_objects"]
 
 empty = Fake(version_pages=[{}])
 core.object_store = lambda: empty
 core.object_delete_versions("b", "k")
-plain = [c for c in empty.calls if c[0] == "delete_object"]
+plain = [c[1] for c in empty.calls if c[0] == "delete_object"]
 print(json.dumps({
-    "targets": versioned[0][1]["Delete"]["Objects"] if versioned else [],
-    "fell_back": bool(plain),
+    "targets": [{"Key": c["Key"], "VersionId": c["VersionId"]} for c in versioned],
+    "batched": len(batched),
+    "fell_back": bool(plain) and "VersionId" not in plain[0],
 }))
 ''')
+        # One delete_object per version, and never delete_objects: that verb is
+        # checksum-required in botocore, so the store receives a signed CRC32
+        # header regardless of request_checksum_calculation, and older RGW /
+        # MinIO answer 400 or 501 to it (see object_delete_versions).
         self.assertEqual(
             out["targets"],
             [{"Key": "k", "VersionId": "v1"}, {"Key": "k", "VersionId": "d1"}],
         )
+        self.assertEqual(out["batched"], 0)
         # A store without versioning reports no versions at all; without this
         # branch every purge on such a store silently deletes nothing.
         self.assertTrue(out["fell_back"])
+
+    def test_checkpoint_delete_reports_whether_history_really_went(self) -> None:
+        out = run('''
+import json
+from botocore.exceptions import ClientError
+
+def rejected(**kwargs):
+    raise ClientError({"Error": {"Code": "AccessDenied", "Message": "x"},
+                       "ResponseMetadata": {"HTTPStatusCode": 403}}, "ListObjectVersions")
+
+def outage(**kwargs):
+    raise ClientError({"Error": {"Code": "ServiceUnavailable", "Message": "x"},
+                       "ResponseMetadata": {"HTTPStatusCode": 503}}, "ListObjectVersions")
+
+class NoVersioning(Fake):
+    def get_paginator(self, name):
+        if name == "list_object_versions":
+            return type("P", (), {"paginate": staticmethod(rejected)})()
+        return super().get_paginator(name)
+
+class Down(Fake):
+    def get_paginator(self, name):
+        if name == "list_object_versions":
+            return type("P", (), {"paginate": staticmethod(outage)})()
+        return super().get_paginator(name)
+
+results = {}
+ws = "ws-0123456789ab"
+versioned = Fake(version_pages=[{"Versions": [{"Key": "workspaces/%s/checkpoints/cp-1.tar.gz" % ws, "VersionId": "v1"}]}])
+core.object_store = lambda: versioned
+results["versioned"] = core.delete_workspace_checkpoint(ws, "cp-1")["history_retained"]
+
+flat = NoVersioning()
+core.object_store = lambda: flat
+results["fallback"] = core.delete_workspace_checkpoint(ws, "cp-1")["history_retained"]
+results["fallback_plain_delete"] = [c[1].get("VersionId", "none") for c in flat.calls if c[0] == "delete_object"]
+
+down = Down()
+core.object_store = lambda: down
+try:
+    core.delete_workspace_checkpoint(ws, "cp-1")
+    results["outage"] = "swallowed"
+except core.ObjectStoreBusy:
+    results["outage"] = "raised"
+results["outage_deletes"] = [c for c in down.calls if c[0] == "delete_object"]
+print(json.dumps(results))
+''')
+        self.assertFalse(out["versioned"])
+        # The fallback ran a plain delete: the versions are still there and the
+        # response must say so instead of reporting a purge that did not happen.
+        self.assertTrue(out["fallback"])
+        self.assertEqual(out["fallback_plain_delete"], ["none"])
+        # An outage on the listing is not "this store has no versioning".
+        self.assertEqual(out["outage"], "raised")
+        self.assertEqual(out["outage_deletes"], [])
 
     def test_stat_accepts_both_metadata_spellings(self) -> None:
         out = run('''
@@ -354,6 +421,100 @@ print(json.dumps({
         self.assertEqual(out["bytes"], [1, 2, 3])
         self.assertEqual(out["stamps"][0], "2026-09-01T00:00:00+00:00")
         self.assertEqual(out["prefix"], ["prefix/"])
+
+    def test_a_paged_walk_never_trips_the_listing_ceiling(self) -> None:
+        out = run('''
+import json
+core.MAX_LIST_ENTRIES = 10
+
+class Paged(Fake):
+    def __init__(self, pages):
+        super().__init__()
+        self.paged = pages
+    def list_objects_v2(self, **kwargs):
+        self.calls.append(("list_objects_v2", kwargs))
+        index = int(kwargs.get("ContinuationToken") or 0)
+        page = dict(self.paged[index])
+        if index + 1 < len(self.paged):
+            page["IsTruncated"] = True
+            page["NextContinuationToken"] = str(index + 1)
+        return page
+
+pages = [
+    {"Contents": [{"Key": "p/k%d-%d" % (n, i), "Size": 1, "LastModified": when(1)} for i in range(6)]}
+    for n in range(5)
+]
+store = Paged(pages)
+core.object_store = lambda: store
+seen = []
+token = None
+rounds = 0
+try:
+    while True:
+        items, token = core.object_list_page("b", "p/", continuation_token=token, page_size=6)
+        seen.extend(item["key"] for item in items)
+        rounds += 1
+        if not token:
+            break
+    verdict = "walked"
+except ValueError:
+    verdict = "refused"
+print(json.dumps({
+    "verdict": verdict,
+    "rounds": rounds,
+    "keys": len(seen),
+    "distinct": len(set(seen)),
+    "tokens": [c[1].get("ContinuationToken") for c in store.calls if c[0] == "list_objects_v2"],
+    "max_keys": sorted({c[1]["MaxKeys"] for c in store.calls if c[0] == "list_objects_v2"}),
+}))
+''')
+        # 30 objects against a ceiling of 10: object_list would refuse between
+        # pages, and the checkpoint GC that used it stopped for good once the
+        # bucket outgrew the ceiling. The paged walk sees every key exactly once.
+        self.assertEqual(out["verdict"], "walked")
+        self.assertEqual((out["rounds"], out["keys"], out["distinct"]), (5, 30, 30))
+        self.assertEqual(out["tokens"], [None, "1", "2", "3", "4"])
+        self.assertEqual(out["max_keys"], [6])
+
+    def test_a_truncated_body_is_refused_whatever_the_declared_length_says(self) -> None:
+        out = run('''
+import json, hashlib
+LIMIT = 4096
+body = b"x" * 2000
+def attempt(declared, expected_sha256=None):
+    store = Fake(body=body, declared=declared, omit_length=declared is None)
+    core.object_store = lambda: store
+    try:
+        data = core.object_get("b", "k", LIMIT, expected_sha256=expected_sha256)
+        return "accepted:%d" % len(data)
+    except core.ObjectStoreUnavailable:
+        return "refused_outage"
+    except ValueError:
+        return "refused_too_large"
+    except Exception as error:
+        return type(error).__name__
+print(json.dumps({
+    # Declared above the ceiling, cut before it: the old guard skipped this case.
+    "declared_above_limit_cut_early": attempt(100000),
+    # Declared under the ceiling, cut before it: the case the old guard did catch.
+    "declared_under_limit_cut_early": attempt(4000),
+    # No ContentLength and nothing to vouch for the body.
+    "undeclared_without_digest": attempt(None),
+    # No ContentLength, but the caller's digest matches: the only way through.
+    "undeclared_with_matching_digest": attempt(None, hashlib.sha256(body).hexdigest()),
+    "undeclared_with_wrong_digest": attempt(None, "0" * 64),
+    # Complete bodies still pass, on both sides of the ceiling comparison.
+    "complete": attempt(2000),
+}))
+''')
+        # The Fake's ``declared`` sends fewer bytes than it promises (see
+        # ``Fake.get_object``); ``None`` sends no ContentLength at all.
+        self.assertEqual(out["declared_above_limit_cut_early"], "refused_outage")
+        self.assertEqual(out["declared_under_limit_cut_early"], "refused_outage")
+        self.assertEqual(out["undeclared_without_digest"], "refused_outage")
+        self.assertEqual(out["undeclared_with_matching_digest"], "accepted:2000")
+        self.assertEqual(out["undeclared_with_wrong_digest"], "refused_outage")
+        self.assertEqual(out["complete"], "accepted:2000")
 
 
 if __name__ == "__main__":

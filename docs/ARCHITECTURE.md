@@ -1,5 +1,12 @@
 # Architecture
 
+## Scope
+
+This repository is released and deployed on its own. It depends on no other
+repository, and other products integrate with it as an external tenant: they
+hold an API key, call the published HTTP contract, and never share a database,
+a volume or a signing key with it.
+
 ## Process boundaries
 
 ```text
@@ -77,19 +84,6 @@ These are the boundaries that were chosen, not merely the work that is undone.
 | Checkpoint | A validated archive of Workspace files stored in the object store. Not a VM, process, or memory snapshot. |
 | Template | An approved Runtime image reference, from `SANDBOX_TEMPLATES` or the admin API. |
 | Object ticket | A single-use, object-bound credential for one upload or download. |
-
-### Legacy comment vocabulary
-
-Older comments were machine-translated and still use a few words that do not match
-the terms above. They are being translated back; until then read them as follows:
-
-| Comment says | Read as |
-| --- | --- |
-| library | database / store (`control plane.STORE`), never a Python import |
-| box, "box building" | Runtime Pod, Runtime creation |
-| character, role | process role selected by `SANDBOX_CONTROL_PLANE_ROLE` |
-| account | tenant |
-| card, record | row in the store |
 
 ## Request and resource lifecycle
 

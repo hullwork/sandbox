@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -77,6 +78,16 @@ def session_environment(workspace: pathlib.Path) -> dict[str, str]:
         "PROMPT_COMMAND": "",
         "TERM": "dumb",
     }
+
+
+def process_alive(pid: int) -> bool:
+    """Alive means scheduled: a zombie has been killed and is merely unreaped."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            state = handle.read().rsplit(b")", 1)[-1].split()[0]
+    except OSError:
+        return False
+    return state != b"Z"
 
 
 def collector() -> tuple[list[tuple[str, str]], object]:
@@ -508,6 +519,36 @@ class ShellSessionTests(unittest.TestCase):
                 "SIGKILL was already sent, so that is a zombie",
             )
         self.assertIsNotNone(process.returncode)
+
+    def test_close_kills_a_background_job_the_shell_left_behind(self) -> None:
+        """``cmd &`` survives both killpg calls: interactive bash gives it a
+        process group of its own, and it is not the foreground group either.
+        Before this the only thing that ended it was the Pod's TTL.
+        """
+        chunks, on_chunk = collector()
+        result = self.manager.handle(
+            {
+                "action": "session_exec",
+                "session_id": "bg",
+                # Far longer than the wait below: a job that merely ran out
+                # would pass this test for the wrong reason.
+                "command": "sleep 600 >/dev/null 2>&1 & printf 'pid=%s\\n' $!",
+                "timeout_seconds": 3,
+            },
+            on_chunk,
+        )
+        self.assertFalse(result["running"])
+        match = re.search(r"pid=(\d+)", "".join(text for _, text in chunks))
+        self.assertIsNotNone(match, chunks)
+        pid = int(match.group(1))
+        self.addCleanup(lambda: process_alive(pid) and os.kill(pid, 9))
+        self.assertTrue(process_alive(pid), "the background job should be up")
+
+        self.assertTrue(self.manager.cancel("bg"))
+        deadline = time.monotonic() + 10.0
+        while process_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertFalse(process_alive(pid), f"background job {pid} outlived close()")
 
     def test_close_keeps_the_pty_fd_while_the_reader_still_holds_it(self) -> None:
         """Closing master_fd under a live reader hands it to the next openpty.

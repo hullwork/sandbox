@@ -9,7 +9,7 @@ metadata:
 spec:
   replicas: 1
  # 🔴 Recreate, not RollingUpdate: a single replica is a constraint, not a default.
- # Runtime admission (_RUNTIME_ADMISSION_LOCK, _CREATE_SLOTS), the mc semaphore,
+ # Runtime admission (_RUNTIME_ADMISSION_LOCK, _CREATE_SLOTS), the object-store gate,
  # the in-memory runtime states of the no-database mode and the reaper all live
  # inside one process. A rolling update keeps old and new Pods serving side by
  # side for up to the 210s grace period: MAX_RUNTIMES can be exceeded twice
@@ -26,18 +26,23 @@ spec:
         app.kubernetes.io/name: sandbox-control-plane
         app.kubernetes.io/managed-by: sandbox-controller
     spec:
- # Turn off the budget cap for orchestration. After Control Plane receives SIGTERM, it first asks /readyz to report 503 (K8s accordingly
- # Extract Endpoints), wait for SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS, then stop listening and wait for requests in transit
- # and background runtime provisioning to finish, and finally wait for the reaper to complete its current round.
- # 🔴 This value must be greater than the total budget of that arrangement (SHUTDOWN_BUDGET_SECONDS of core.py
- # = 5 picking traffic + 120 waiting in transit + 60 waiting reaper = 185s), otherwise SIGKILL will be
- # Arriving midway, graceful shutdown becomes a decoration - and the failure method is "occasionally dropping a few requests/occasionally more
- # Output a line "pending", which is difficult to attribute here.
- # It used to be 30s: that does not even cover one synchronous provisioning (wait_for_pod 90s + health check 20s);
- # cutting in between admit and activate leaves "a pending row in the store + a running Pod in the cluster
- # Pod + client cannot get sandbox_id", it will take 10 minutes of cleaning to heal itself.
- # ⚠️ This 185s is the **upper limit, not the time consuming**: when there are no requests in transit, it only takes a little over 5s to complete the arrangement.
- # K8s will not wait for the grace period to expire - the process will exit by itself and the Pod will disappear immediately.
+ # Budget for the shutdown sequence. After SIGTERM the Control Plane first makes
+ # /readyz answer 503 (so Kubernetes removes it from Endpoints), waits
+ # SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS, then stops listening and waits for
+ # in-flight requests and background Runtime provisioning to finish, and finally
+ # waits for the reaper to complete its current round.
+ # 🔴 This value must exceed the total budget of that sequence
+ # (SHUTDOWN_BUDGET_SECONDS in core.py = 5s drain + 120s in-flight + 60s reaper
+ # = 185s). Otherwise SIGKILL lands halfway through and graceful shutdown is
+ # decoration - and the failure shows up as "a few requests dropped now and then"
+ # or "one more row left in pending", neither of which points back here.
+ # It used to be 30s, which does not even cover one synchronous provisioning
+ # (wait_for_pod 90s + health check 20s): killed between admit and activate, a
+ # pending row stays in the store, a Pod keeps running in the cluster, and the
+ # client never receives its sandbox_id - ten minutes of cleanup before it heals.
+ # ⚠️ 185s is the upper bound, not the usual cost: with nothing in flight the
+ # sequence finishes in a little over 5s. Kubernetes does not wait out the grace
+ # period - the process exits on its own and the Pod is gone at once.
       terminationGracePeriodSeconds: 210
       serviceAccountName: sandbox-control-plane
       automountServiceAccountToken: true
@@ -86,13 +91,13 @@ spec:
  # Will get stuck on RunContainerError after successful scheduling. Leave empty to abandon gVisor kernel isolation.
             - name: SANDBOX_RUNTIME_CLASS
               value: gvisor
- # Runtime Pod (untrusted code) is nailed to sandbox.convee.io/node-role=runtime
+ # Runtime Pod (untrusted code) is nailed to sandbox.hullwork.com/node-role=runtime
  # Labeled worker node, separated from the control-plane/Control Plane. The label of the local stack is placed in
  # on the designated runtime node; if unset, portable single-node behavior is preserved.
             - name: SANDBOX_RUNTIME_NODE_SELECTOR
-              value: sandbox.convee.io/node-role=runtime
+              value: sandbox.hullwork.com/node-role=runtime
             - name: SANDBOX_RUNTIME_TOLERATIONS
-              value: '[{"key":"sandbox.convee.io/node-role","operator":"Equal","value":"runtime","effect":"NoSchedule"}]'
+              value: '[{"key":"sandbox.hullwork.com/node-role","operator":"Equal","value":"runtime","effect":"NoSchedule"}]'
  # Prefix whitelist of template images, separated by commas. **Not configured = Template management is closed as a whole**
  # (POST/DELETE /v1/admin/templates returns 409, /v1/whoami’s
  # templates:write) does not appear in capabilities, this is a deliberate fail closed:
@@ -208,22 +213,25 @@ spec:
             capabilities:
               drop:
                 - ALL
- # 🔴 To be ready type /readyz instead of /healthz. /healthz is **relying on physical examination**: it except
- # K8s API also needs to explore the object storage, if anything fails, it will get 503. And this Deployment is
- # replicas: 1 - The consequence of connecting it to readinessProbe is: cross-cluster storage
- # blip, the only Endpoint is removed, and the agent host loses its connection.
- # sandbox-control-plane.sandbox-system.svc:8080 cannot be dialed, so **sandboxes that are already running
- # can no longer exec, list, or release**, although these three paths are the same
- # bytes without touching the object store. A downstream local fault is amplified by the probe into the entire control-plane
- # Disappears, and only Pod 0/1 is seen on site, which does not point to storage.
- # The criterion for /readyz is only "Whether removing the traffic of this copy can improve the situation" - under single copy
- # Only turn off the arrangement calculation, nothing else will be entered. When storage really fails, those that really depend on it
- # Route yourself back to 503 + retry_after_seconds (ObjectStoreUnavailable),
- # Do not rely on its business-as-usual service.
- # Don't change /healthz to startupProbe: that will cause storage jitter
- # Control Plane cannot be restarted/rescheduled, and the same amplification effect will recur at another time. Deployment period
- # Wiring verification belongs in the deployment's release gate, where red is reported
- # The price is "failure to pass a certain step", not "service interruption".
+ # 🔴 Readiness is /readyz, not /healthz. /healthz is a dependency health check:
+ # besides the Kubernetes API it probes the object store, and any failure is a
+ # 503. This Deployment runs replicas: 1, so wiring /healthz to the
+ # readinessProbe means one cross-cluster storage blip removes the only Endpoint
+ # and the agent host loses its connection: sandbox-control-plane.sandbox-system.svc:8080
+ # stops answering, so **sandboxes that are already running can no longer exec,
+ # list or release**, although none of those three paths touches the object
+ # store. The probe amplifies a fault in one downstream into the whole control
+ # plane vanishing, and all anyone sees on the ground is Pod 0/1, which does not
+ # point at storage.
+ # The only question /readyz answers is "would taking this replica out of
+ # traffic help" - with a single replica the answer is the shutdown sequence and
+ # nothing else. When storage really is down, the routes that depend on it
+ # answer 503 + retry_after_seconds (ObjectStoreUnavailable) themselves; the
+ # rest keep serving.
+ # Do not move /healthz to a startupProbe either: then a storage blip stops the
+ # Control Plane from restarting or rescheduling, the same amplification at a
+ # different moment. Verifying the probe wiring belongs in the deployment's
+ # release gate, where a red costs "one step failed", not "service down".
           readinessProbe:
             httpGet:
               path: /readyz
@@ -248,9 +256,16 @@ spec:
               mountPath: /var/run/sandbox-db
               readOnly: true
       volumes:
+ # 🔴 /tmp is where every large body is spooled (ticket uploads, export archives,
+ # checkpoints), and the kubelet's answer to an emptyDir over its sizeLimit is to
+ # evict the whole Pod - single replica, reaper included. The Control Plane takes
+ # its object-queue slot before the first body byte, so the most it can ever hold
+ # on this volume is SANDBOX_MAX_OBJECT_QUEUE (default 32) × MAX_STREAM_OBJECT_BYTES
+ # (64Mi above) = 2Gi. Keep this at or above that product when either changes;
+ # tests/test_object_upload_gate.py checks the arithmetic.
         - name: tmp
           emptyDir:
-            sizeLimit: 96Mi
+            sizeLimit: 2Gi
         - name: db-password
           secret:
             secretName: sandbox-postgres-auth

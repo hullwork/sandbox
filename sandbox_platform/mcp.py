@@ -103,7 +103,12 @@ TOOLS = [
     },
     {
         "name": "sandbox_status",
-        "description": "Show the workspace and runtime (gVisor Pod) status bound to this session.",
+        "description": (
+            "Show this process's cached lease for the session: workspace and "
+            "runtime (gVisor Pod) ids as last seen. It does not contact the "
+            "Control Plane, so it cannot tell whether either is still reachable; "
+            "run shell to find out."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     # File tools match the backend agent surface. SandboxManager owns HTTP and
@@ -316,19 +321,47 @@ def call_tool(name: str, arguments: dict) -> dict:
     return _tool_error(f"unknown tool: {name}")
 
 
-def handle(request: dict) -> dict | None:
-    method = request.get("method", "")
+def _rpc_error(request_id: object, code: int, message: str) -> dict:
+    return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+
+
+def handle(request: object) -> dict | None:
+    """Answer one JSON-RPC request; never raises.
+
+    Whatever goes wrong inside a request is reported on that request's id
+    (-32600 / -32602 / -32603) instead of unwinding serve(): a stdio server
+    that exits on one malformed line looks to the host like a disconnect, and
+    every lease cached in this process goes with it.
+    """
+    if not isinstance(request, dict):
+        # JSON-RPC batches and bare scalars. MCP hosts do not send batches (the
+        # 2025-06-18 revision removed them), so refusing is the whole answer.
+        return _rpc_error(None, -32600, "invalid request: expected a JSON object")
     request_id = request.get("id")
+    try:
+        return _handle(request, request_id)
+    except Exception as exc:  # noqa: BLE001 - last line of defence for the serve loop
+        return _rpc_error(
+            request_id, -32603, f"internal error: {type(exc).__name__}: {exc}"
+        )
+
+
+def _handle(request: dict, request_id: object) -> dict | None:
+    method = request.get("method", "")
+    params = request.get("params")
     if method == "notifications/initialized":
         return None
     if method == "initialize":
+        version = (
+            params.get("protocolVersion", FALLBACK_PROTOCOL_VERSION)
+            if isinstance(params, dict)
+            else FALLBACK_PROTOCOL_VERSION
+        )
         return {
             "jsonrpc": "2.0",
             "id": request_id,
             "result": {
-                "protocolVersion": request.get("params", {}).get(
-                    "protocolVersion", FALLBACK_PROTOCOL_VERSION
-                ),
+                "protocolVersion": version,
                 "capabilities": {"tools": {}},
                 "serverInfo": SERVER_INFO,
             },
@@ -336,21 +369,32 @@ def handle(request: dict) -> dict | None:
     if method == "tools/list":
         return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
     if method == "tools/call":
-        params = request.get("params", {})
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return _rpc_error(request_id, -32602, "invalid params: params must be an object")
+        name = params.get("name", "")
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}
+        if not isinstance(name, str) or not isinstance(arguments, dict):
+            return _rpc_error(
+                request_id,
+                -32602,
+                "invalid params: name must be a string and arguments an object",
+            )
         try:
-            result = call_tool(params.get("name", ""), params.get("arguments", {}))
+            result = call_tool(name, arguments)
         except ControlPlaneError as exc:
             # ControlPlaneError only has .status, message in str(exc)(RuntimeError args).
             result = _tool_error(f"control_plane error {exc.status}: {exc}")
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            # TypeError is the shape of a wrongly typed argument (``int(None)``
+            # for ``timeout_seconds: null``): a tool error, not a server fault.
             result = _tool_error(f"{type(exc).__name__}: {exc}")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     if request_id is not None:
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": f"method not found: {method}"},
-        }
+        return _rpc_error(request_id, -32601, f"method not found: {method}")
     return None
 
 
@@ -402,7 +446,15 @@ def main(argv: list[str] | None = None) -> int:
             "(stdin is a terminal; see --help)\n"
         )
         return 2
-    serve(sys.stdin, sys.stdout)
+    # The protocol owns fd 1 through a handle of its own. Anything else that
+    # writes to "stdout" while a tool runs - a stray print in the SDK, a
+    # library's debug output - lands on stderr instead: one such line in the
+    # middle of the JSON stream and the host drops the connection. (Python's
+    # logging already falls back to stderr when nothing is configured.)
+    sys.stdout.flush()
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
+    sys.stdout = sys.stderr
+    serve(sys.stdin, protocol)
     return 0
 
 
@@ -414,8 +466,9 @@ def serve(stdin, stdout) -> None:
         try:
             request = json.loads(line)
         except ValueError:
-            continue
-        response = handle(request)
+            response = _rpc_error(None, -32700, "parse error: line is not valid JSON")
+        else:
+            response = handle(request)
         if response is not None:
             stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             stdout.flush()
