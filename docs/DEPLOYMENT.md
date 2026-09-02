@@ -14,9 +14,10 @@ helm template sandbox charts/sandbox
 
 `values.schema.json` validates the public configuration surface. Every product
 image accepts an immutable `sha256:` digest; when set, the digest takes
-precedence over its tag. `package.yaml` declares portable requirements such as
-Kubernetes, PostgreSQL, S3, RWX storage, and gVisor. It is metadata for optional
-composition; Helm does not read it when this chart is installed directly.
+precedence over its tag. What the chart needs from the cluster - a PostgreSQL or
+MySQL database, S3-compatible object storage, an RWX StorageClass, and a gVisor
+RuntimeClass - is configured through `values.yaml` and described in the
+[Production guide](PRODUCTION.md).
 
 The existing Kustomize bases remain supported for source deployments. The Helm
 chart is the versioned package boundary for external GitOps composition.
