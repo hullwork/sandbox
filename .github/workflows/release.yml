@@ -281,7 +281,6 @@ jobs:
           helm lint charts/sandbox
           helm template sandbox charts/sandbox >chart-dist/sandbox-rendered.yaml
           helm package charts/sandbox --destination chart-dist
-          cp charts/sandbox/package.yaml chart-dist/sandbox-package.yaml
       - name: Authenticate to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
       - name: Publish immutable OCI chart and package metadata
@@ -293,7 +292,6 @@ jobs:
           test -n "$chart_digest"
           chart_file="$(printf '%s\n' chart-dist/sandbox-*.tgz)"
           chart_checksum="sha256:$(sha256sum "$chart_file" | awk '{print $1}')"
-          descriptor_checksum="sha256:$(sha256sum chart-dist/sandbox-package.yaml | awk '{print $1}')"
           jq -s '[.[] | select(.component?)]' chart-dist/image-*.json >chart-dist/images.json
           jq -n \
             --arg name sandbox \
@@ -302,9 +300,8 @@ jobs:
             --arg digest "$chart_digest" \
             --arg chartFile "${chart_file#chart-dist/}" \
             --arg chartChecksum "$chart_checksum" \
-            --arg descriptorChecksum "$descriptor_checksum" \
             --slurpfile images chart-dist/images.json \
-            '{schemaVersion:1,name:$name,version:$version,package:{type:"helm-oci",url:$url,digest:$digest,immutableRef:($url+"@"+$digest)},artifacts:{chart:{filename:$chartFile,sha256:$chartChecksum},packageDescriptor:{filename:"sandbox-package.yaml",sha256:$descriptorChecksum}},runtimeImages:{publishedByThisWorkflow:true,images:$images[0]}}' \
+            '{schemaVersion:1,name:$name,version:$version,package:{type:"helm-oci",url:$url,digest:$digest,immutableRef:($url+"@"+$digest)},artifacts:{chart:{filename:$chartFile,sha256:$chartChecksum}},runtimeImages:{publishedByThisWorkflow:true,images:$images[0]}}' \
             >chart-dist/package-metadata.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

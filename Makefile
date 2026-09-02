@@ -36,7 +36,7 @@ test: ## — run standalone unit tests
 chart-lint: ## — validate the independently deployable Helm package
 	helm lint charts/sandbox
 
-chart-render: ## — render the Helm package without an Infra checkout
+chart-render: ## — render the Helm package without any other repository
 	helm template sandbox charts/sandbox >/dev/null
 
 dev-token: ## — print the local development control-plane token
