@@ -76,6 +76,18 @@ Versioning after its first public release.
 
 ### Fixed
 
+- Findings of the 2026-09-02 pre-release review, in four groups. Control plane:
+  request handling, admission and readiness defects found by reading the API
+  and store paths. Lifecycle: Runtime, workspace and checkpoint state transitions
+  that could strand a row or a Pod. Supply chain: image, lockfile and release
+  workflow gaps. Documentation and compliance: the object-store hop is described
+  as "not traced yet" rather than "cannot be traced" (`mc` is gone), the
+  configuration reference lists every environment variable the code reads
+  across all four roles, `THIRD_PARTY_NOTICES.md` names the LGPL database
+  driver, `docs/RELEASE.md` carries the before-public checklist, and the
+  comments guarding the `/healthz`-versus-readiness decision and the shutdown
+  budget are readable English again. Each group is pinned by tests that fail on
+  the state the review found.
 - `WORKSPACE_ID_KEY` is required and no longer falls back to `SIGNING_KEY`.
 - `GET /v1/admin/audit` returned no response because of a keyword-only argument.
 - Re-registering a soft-deleted Workspace no longer fails on the retained row.
