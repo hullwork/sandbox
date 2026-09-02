@@ -1772,7 +1772,17 @@ def object_put(
     )
 
 
-def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
+def object_get(
+    bucket: str,
+    key: str,
+    max_bytes: int,
+    *,
+    expected_sha256: str | None = None,
+) -> bytes:
+    """Read one object whole, refusing anything that is not provably the whole object.
+
+    `expected_sha256` is the caller's own record of the content (checkpoint metadata, a ticket); it is
+    the only thing that can vouch for a body the store did not declare a length for."""
     def read() -> bytes:
         response = object_store().get_object(Bucket=bucket, Key=key)
         # Not `with response["Body"]`: StreamingBody.__enter__ returns its
@@ -1795,8 +1805,30 @@ def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
         # mid-object hands back the prefix and no error -- and get_object()
         # hashes that prefix and returns a self-consistent, wrong answer.
         # `mc cat` used to catch this with its exit code.
+        #
+        # 🔴 The comparison must hold for a declared length **above** the ceiling
+        # too. The read asks for max_bytes + 1, so an object declared larger than
+        # that is expected to deliver exactly max_bytes + 1 bytes (and be refused
+        # above as too large); delivering fewer means the connection died before
+        # the ceiling, and the prefix must not come back as a legal small object.
+        # The earlier `declared <= max_bytes and` guard skipped exactly that case.
         declared = response.get("ContentLength")
-        if declared is not None and declared <= max_bytes and len(data) != declared:
+        if declared is None:
+            # No length to check against: only the caller's own digest can vouch
+            # for the body. Without one, refuse rather than trust a chunked body.
+            if expected_sha256 is None:
+                raise ObjectStoreUnavailable(
+                    "object storage is unreachable; retry shortly"
+                )
+            if not hmac.compare_digest(
+                hashlib.sha256(data).hexdigest(), expected_sha256
+            ):
+                raise ObjectStoreUnavailable(
+                    "object storage is unreachable; retry shortly"
+                )
+            return data
+        expected = min(int(declared), max_bytes + 1)
+        if len(data) != expected:
             raise ObjectStoreUnavailable(
                 "object storage is unreachable; retry shortly"
             )
@@ -2683,7 +2715,10 @@ def restore_workspace_checkpoint(
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"workspaces/{workspace_id}/checkpoints/{checkpoint_id}.tar.gz"
     archive = object_get(
-        OBJECT_STORE_WORKSPACE_BUCKET, key, MAX_STREAM_OBJECT_BYTES
+        OBJECT_STORE_WORKSPACE_BUCKET,
+        key,
+        MAX_STREAM_OBJECT_BYTES,
+        expected_sha256=expected_sha256 or None,
     )
     digest = hashlib.sha256(archive).hexdigest()
     if expected_sha256 and not hmac.compare_digest(expected_sha256, digest):

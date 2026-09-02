@@ -66,10 +66,13 @@ class Paginator:
 
 
 class Fake:
-    def __init__(self, body=b"", pages=None, version_pages=None, declared=None):
+    def __init__(self, body=b"", pages=None, version_pages=None, declared=None, omit_length=False):
         self.calls = []
         self.body = body
         self.declared = declared
+        # A response with no ContentLength at all (a chunked body), as opposed
+        # to one that declares more than it sends.
+        self.omit_length = omit_length
         self.pages = pages or [{}]
         self.version_pages = version_pages or [{}]
     def get_object(self, **kwargs):
@@ -78,6 +81,8 @@ class Fake:
         # against what it actually read. `declared` lets a case send fewer
         # bytes than it promises.
         declared = self.declared if self.declared is not None else len(self.body)
+        if self.omit_length:
+            return {"Body": Body(self.body)}
         return {"Body": Body(self.body), "ContentLength": declared}
     def head_object(self, **kwargs):
         self.calls.append(("head_object", kwargs))
@@ -408,6 +413,46 @@ print(json.dumps({
         self.assertEqual((out["rounds"], out["keys"], out["distinct"]), (5, 30, 30))
         self.assertEqual(out["tokens"], [None, "1", "2", "3", "4"])
         self.assertEqual(out["max_keys"], [6])
+
+    def test_a_truncated_body_is_refused_whatever_the_declared_length_says(self) -> None:
+        out = run('''
+import json, hashlib
+LIMIT = 4096
+body = b"x" * 2000
+def attempt(declared, expected_sha256=None):
+    store = Fake(body=body, declared=declared, omit_length=declared is None)
+    core.object_store = lambda: store
+    try:
+        data = core.object_get("b", "k", LIMIT, expected_sha256=expected_sha256)
+        return "accepted:%d" % len(data)
+    except core.ObjectStoreUnavailable:
+        return "refused_outage"
+    except ValueError:
+        return "refused_too_large"
+    except Exception as error:
+        return type(error).__name__
+print(json.dumps({
+    # Declared above the ceiling, cut before it: the old guard skipped this case.
+    "declared_above_limit_cut_early": attempt(100000),
+    # Declared under the ceiling, cut before it: the case the old guard did catch.
+    "declared_under_limit_cut_early": attempt(4000),
+    # No ContentLength and nothing to vouch for the body.
+    "undeclared_without_digest": attempt(None),
+    # No ContentLength, but the caller's digest matches: the only way through.
+    "undeclared_with_matching_digest": attempt(None, hashlib.sha256(body).hexdigest()),
+    "undeclared_with_wrong_digest": attempt(None, "0" * 64),
+    # Complete bodies still pass, on both sides of the ceiling comparison.
+    "complete": attempt(2000),
+}))
+''')
+        # The Fake's ``declared`` sends fewer bytes than it promises (see
+        # ``Fake.get_object``); ``None`` sends no ContentLength at all.
+        self.assertEqual(out["declared_above_limit_cut_early"], "refused_outage")
+        self.assertEqual(out["declared_under_limit_cut_early"], "refused_outage")
+        self.assertEqual(out["undeclared_without_digest"], "refused_outage")
+        self.assertEqual(out["undeclared_with_matching_digest"], "accepted:2000")
+        self.assertEqual(out["undeclared_with_wrong_digest"], "refused_outage")
+        self.assertEqual(out["complete"], "accepted:2000")
 
 
 if __name__ == "__main__":
