@@ -117,6 +117,27 @@ def reap_once(now: int | None = None) -> dict[str, int]:
             over_hard_limit = bool(
                 hard_expires_at and hard_expires_at <= current
             )
+            if not over_hard_limit:
+                # 🔴 Re-read before acting. The verdict above came from the snapshot at the start of the
+                # round; ensure_runtime may have reused and touched this Runtime since (it does so for an
+                # expired candidate precisely so this check sees it). Deleting on the stale snapshot handed
+                # a client a sandbox that vanished before its first MCP call. "Not found" means someone
+                # else already deleted it; any other driver failure leaves it for next round rather than
+                # deleting on data known to be stale.
+                try:
+                    latest = runtime_driver.get_runtime(sandbox_id)
+                except control_plane.RuntimeDriverError as exc:
+                    if exc.code != control_plane.RuntimeDriverErrorCode.NOT_FOUND:
+                        print(f"[reaper] {sandbox_id} re-read failed, kept this round: {exc}", flush=True)
+                        if workspace_id:
+                            active_workspaces.add(workspace_id)
+                    continue
+                if latest.expires_at and latest.expires_at > current:
+                    # Touched since the snapshot: treated exactly like a busy reprieve.
+                    reprieved_runtimes += 1
+                    if workspace_id:
+                        active_workspaces.add(workspace_id)
+                    continue
             if not over_hard_limit and control_plane.probe_runtime_busy(sandbox_id):
                 control_plane.touch_runtime(sandbox_id, current)
                 reprieved_runtimes += 1

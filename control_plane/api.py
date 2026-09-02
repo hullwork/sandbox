@@ -845,10 +845,19 @@ class ApiHandler(BaseHTTPRequestHandler):
            Use indicators + logs to make the fact that "auditing is failing" itself observable."""
         if control_plane.STORE is None:
             return
+        actor_kind = self.credential_kind()
+        actor_id = self.actor_id()
+        if outcome == "denied" and not control_plane.DENIED_AUDITS.admit(
+            (actor_kind, actor_id, action, target)
+        ):
+            # The same actor was already recorded probing the same target within
+            # the window; a repeat adds no signal and unbounded repeats fill the
+            # table (see DenialThrottle).
+            return
         try:
             control_plane.STORE.record_audit(
-                actor_kind=self.credential_kind(),
-                actor_id=self.actor_id(),
+                actor_kind=actor_kind,
+                actor_id=actor_id,
                 action=action,
                 target=target,
                 outcome=outcome,

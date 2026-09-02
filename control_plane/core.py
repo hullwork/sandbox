@@ -689,6 +689,48 @@ if MAX_OBJECT_QUEUE <= 0:
 _OBJECT_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_OBJECT_QUEUE)
 
 
+class DenialThrottle:
+    """Admit at most one audit row per (actor, action, target) per window; in-process, bounded.
+
+    🔴 Why: every ownership denial inserted a row in sandbox_audit_log with no throttle and no
+       retention. Any tenant key looping over guessed ids could grow the table without bound - disk
+       on the database, and list_audit slowing down for the operator who would want to read exactly
+       those rows. The signal the row carries is "this actor is probing this target"; the thousandth
+       repetition within a minute adds nothing to it.
+    Constraint: in-process only. Two replicas may each write one row per window; that is a bounded
+         duplicate, not a leak. Restarting the process forgets the window, which is also bounded.
+    Constraint: memory is bounded by `capacity`; the oldest entries go first. A flood across many
+         distinct targets therefore still writes at most one row per target per window and can evict
+         the window of a quieter actor early - one extra row for them, never a missing first row."""
+
+    def __init__(self, window_seconds: float, capacity: int) -> None:
+        if window_seconds <= 0 or capacity <= 0:
+            raise ValueError("window_seconds and capacity must be positive")
+        self.window_seconds = float(window_seconds)
+        self.capacity = int(capacity)
+        self._seen: dict[tuple, float] = {}
+        self._lock = threading.Lock()
+
+    def admit(self, key: tuple, now: float | None = None) -> bool:
+        """True when this key has not been admitted within the window (and records it)."""
+        current = time.monotonic() if now is None else float(now)
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and current - last < self.window_seconds:
+                return False
+            # Re-insert at the end so eviction order follows last admission.
+            self._seen.pop(key, None)
+            while len(self._seen) >= self.capacity:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen[key] = current
+            return True
+
+
+#: One denied-audit row per (credential kind, actor, action, target) per minute.
+AUDIT_DENIAL_WINDOW_SECONDS = float(os.getenv("SANDBOX_AUDIT_DENIAL_WINDOW_SECONDS", "60"))
+DENIED_AUDITS = DenialThrottle(AUDIT_DENIAL_WINDOW_SECONDS, 4096)
+
+
 # --- Metrics ----------------------------------------------------------------
 # 🔴 Deliberately no tenant label. Two reasons: the label cardinality would grow without bound with the number of tenants, and /metrics is
 # unauthenticated (same level as /healthz, protected by NetworkPolicy), so carrying tenant names would hang the tenant
@@ -3261,11 +3303,35 @@ def ensure_runtime(
             # before the HTTP 201 arrives; a retry must reuse that Pod instead
             # of consuming another runtime slot.
             existing = driver.list_for_workspace(workspace_id)
+            now = int(time.time())
             for candidate in existing:
                 if not candidate.provider_id or not candidate.runtime_id:
                     continue
+                if candidate.hard_expires_at and candidate.hard_expires_at <= now:
+                    # Past the absolute ceiling: the reaper deletes it within a
+                    # round, busy or not, and no touch moves that ceiling. Handing
+                    # it out would be handing out a sandbox with seconds to live.
+                    continue
                 if not candidate.ready:
                     candidate = wait_for_runtime(candidate.runtime_id)
+                if candidate.expires_at and candidate.expires_at <= now:
+                    # 🔴 Expired when listed: the reaper may be in the middle of
+                    # deleting it this very round (its busy probe alone takes up
+                    # to 2s). The touch moves expires-at forward, which a reaper
+                    # that re-reads before deleting honours (reap_once); a delete
+                    # that had already passed that check still lands, so confirm
+                    # the Runtime is still there before returning it. Gone means
+                    # "create a new one", not an error.
+                    try:
+                        touch_runtime(candidate.runtime_id)
+                    except RuntimeDriverError as exc:
+                        if exc.code == RuntimeDriverErrorCode.NOT_FOUND:
+                            continue
+                        raise
+                    alive = runtime_exists(candidate.runtime_id)
+                    if alive is None:
+                        continue
+                    return alive
                 touch_runtime(candidate.runtime_id)
                 return candidate
             pod = runtime_exists(sandbox_id)

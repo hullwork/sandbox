@@ -172,6 +172,7 @@ def build_control_plane(kube: FakeKube, store: FakeStore | None, *, busy: set[st
     control_plane.WORKSPACE_IDLE_TTL_SECONDS = 86_400
     control_plane.WorkspaceOffline = WorkspaceOffline
     control_plane.RuntimeDriverError = RuntimeDriverError
+    control_plane.RuntimeDriverErrorCode = RuntimeDriverErrorCode
     control_plane.ObjectStoreBusy = ObjectStoreBusy
     control_plane.touched: list[tuple[str, int]] = []
     control_plane.deleted_runtimes: list[str] = []
@@ -200,6 +201,17 @@ def build_control_plane(kube: FakeKube, store: FakeStore | None, *, busy: set[st
                 NAMESPACE,
                 "services",
                 control_plane.runtime_pod_name(sandbox_id),
+            )
+
+        def get_runtime(self, sandbox_id):
+            # The re-read before a TTL delete: answers from the Pods as they are
+            # *now*, which a test may have changed since the listing.
+            name = control_plane.runtime_pod_name(sandbox_id)
+            for item in kube.pods:
+                if item["metadata"]["name"] == name:
+                    return runtime_from_pod(item)
+            raise RuntimeDriverError(
+                RuntimeDriverErrorCode.NOT_FOUND, f"{sandbox_id} not found", status=404
             )
 
     runtime_driver = RuntimeDriver()
@@ -392,6 +404,68 @@ class ReconciliationTests(ReaperCase):
         # Direction two (orphans) does not need the fresh snapshot.
         self.assertEqual(result["reconciled_orphans"], 1)
         self.assertEqual(control_plane.deleted_runtimes, ["sb-other"])
+
+
+class ReuseRaceTests(ReaperCase):
+    """A Runtime touched between the round's snapshot and its delete is spared.
+
+    ensure_runtime reuses an existing Runtime for a Workspace; when that Runtime
+    was already expired in the reaper's snapshot, the reaper's busy probe and
+    delete were racing the API's touch, and the client got a sandbox that was
+    deleted before its first MCP call. The reaper now re-reads expires-at right
+    before acting; a touch that landed since the snapshot counts as a reprieve.
+    """
+
+    def test_a_runtime_touched_after_the_snapshot_is_not_deleted(self) -> None:
+        class TouchedAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                snapshot = [json.loads(json.dumps(item)) for item in items]
+                # The API's touch lands after the listing was taken.
+                for item in self.pods:
+                    item["metadata"]["annotations"]["convee.io/expires-at"] = str(NOW + 1800)
+                return snapshot
+
+        kube = TouchedAfterListing([pod("sb-reused", expires_at=NOW - 1, workspace_id="ws-live")])
+        control_plane = build_control_plane(kube, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, [])
+        self.assertEqual(kube.deleted("pods"), [])
+        self.assertEqual(result["runtimes"], 0)
+        self.assertEqual(result["reprieved"], 1)
+        # Spared without the busy probe: the touch alone is the evidence.
+        self.assertEqual(control_plane.probed, [])
+
+    def test_a_runtime_already_gone_at_the_re_read_is_simply_skipped(self) -> None:
+        class GoneAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                self.pods = []
+                return items
+
+        kube = GoneAfterListing([pod("sb-gone", expires_at=NOW - 1)])
+        control_plane = build_control_plane(kube, None)
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, [])
+        self.assertEqual(result["runtimes"], 0)
+
+    def test_the_hard_ceiling_is_not_subject_to_the_re_read(self) -> None:
+        class TouchedAfterListing(FakeKube):
+            def list(self, namespace, plural, label_selector=None):
+                items = super().list(namespace, plural, label_selector)
+                snapshot = [json.loads(json.dumps(item)) for item in items]
+                for item in self.pods:
+                    item["metadata"]["annotations"]["convee.io/expires-at"] = str(NOW + 1800)
+                return snapshot
+
+        kube = TouchedAfterListing([pod("sb-old", expires_at=NOW - 1, hard_expires_at=NOW - 1)])
+        control_plane = build_control_plane(kube, None, busy={"sb-old"})
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = load_reaper(control_plane).reap_once(now=NOW)
+        self.assertEqual(control_plane.deleted_runtimes, ["sb-old"])
+        self.assertEqual(result["runtimes"], 1)
 
 
 class WorkspaceSweepTests(ReaperCase):

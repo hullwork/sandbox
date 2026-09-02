@@ -169,6 +169,16 @@ PROBE = textwrap.dedent(
         # Denied by ownership: must not move the clock.
         call("b_files", "GET", f"/v1/workspaces/{ws}/files/list?path=.", key_b)
         results["age_after_denied"] = age(ws)
+        # The same actor probing the same target again within the window is not
+        # written a second time (DenialThrottle); a different target is.
+        call("b_files_again", "GET", f"/v1/workspaces/{ws}/files/list?path=.", key_b)
+        call("b_checkpoints", "GET", f"/v1/workspaces/{ws}/checkpoints", key_b)
+        call("b_other_target", "GET", "/v1/workspaces/ws-000000000000/checkpoints", key_b)
+        results["denied_rows"] = sorted(
+            (row["action"], row["target"])
+            for row in control_plane.STORE.list_audit(limit=200)
+            if row.get("outcome") == "denied"
+        )
         # Owner, read subset (409: no Runtime) - the gate passed, so the touch lands.
         call("a_files", "GET", f"/v1/workspaces/{ws}/files/list?path=.", key_a)
         results["age_after_owner_read"] = age(ws)
@@ -227,10 +237,21 @@ def run_probe() -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+_PROBE: dict | None = None
+
+
+def cached_probe() -> dict:
+    """One Control Plane boot for every class that reads its results."""
+    global _PROBE
+    if _PROBE is None:
+        _PROBE = run_probe()
+    return _PROBE
+
+
 class RouteTouchTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.results = run_probe()
+        cls.results = cached_probe()
 
     def test_fixture(self) -> None:
         self.assertEqual(self.results["lease"]["status"], 201, self.results["lease"])
@@ -259,6 +280,23 @@ class RouteTouchTests(unittest.TestCase):
         import time as _time
         self.assertAlmostEqual(
             int(view["idle_expires_at"]), int(_time.time()) + 21600 - 7200, delta=30,
+        )
+
+
+class DeniedAuditThrottleTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.results = cached_probe()
+
+    def test_repeated_denials_by_one_actor_on_one_target_write_one_row(self) -> None:
+        for name in ("b_files", "b_files_again", "b_checkpoints", "b_other_target"):
+            self.assertEqual(self.results[name]["status"], 404, self.results[name])
+        self.assertEqual(
+            [tuple(row) for row in self.results["denied_rows"]],
+            sorted([
+                ("workspace.access", self.results["ws"]),
+                ("workspace.access", "ws-000000000000"),
+            ]),
         )
 
 
