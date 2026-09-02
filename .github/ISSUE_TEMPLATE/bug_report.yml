@@ -1,0 +1,64 @@
+name: Bug report
+description: Report reproducible incorrect behavior without including secrets.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include kubeconfigs, API keys, workspace contents, or production
+        data. Anything that crosses the isolation boundary is a vulnerability,
+        not a bug: report it privately through SECURITY.md instead of here.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: One or two sentences on what is wrong.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - SDK
+        - MCP
+        - Control Plane
+        - Runtime
+        - Volume service
+        - Console
+        - Deployment
+        - Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Minimal steps and sanitized configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      value: |
+        - Commit or release:
+        - Deployment mode:
+        - Kubernetes and gVisor versions:
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security impact
+      description: >
+        Whether this affects isolation, credentials or tenancy. If you are not
+        sure, say so rather than leaving it blank -- an unsure answer gets
+        looked at, an empty one looks like "none".

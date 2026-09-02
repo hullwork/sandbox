@@ -1,0 +1,42 @@
+name: Feature request
+description: Propose a scoped capability or documentation improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot be done today. Describe the situation, not the fix.
+    validations:
+      required: true
+  - type: textarea
+    id: contract
+    attributes:
+      label: Proposed contract
+      description: >
+        The API, CLI or configuration surface you are proposing, not the
+        implementation. What does a caller send and what comes back.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: true
+  - type: textarea
+    id: isolation
+    attributes:
+      label: Isolation and credential impact
+      description: >
+        What this would let a workload reach that it cannot reach now, and which
+        credentials it would need. A proposal that widens the boundary is not
+        rejected for that, but it is reviewed differently.
+    validations:
+      required: true
+  - type: textarea
+    id: documentation
+    attributes:
+      label: Documentation impact
+      description: Which documents would have to change.
