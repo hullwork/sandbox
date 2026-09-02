@@ -9,7 +9,7 @@ metadata:
 spec:
   replicas: 1
  # 🔴 Recreate, not RollingUpdate: a single replica is a constraint, not a default.
- # Runtime admission (_RUNTIME_ADMISSION_LOCK, _CREATE_SLOTS), the mc semaphore,
+ # Runtime admission (_RUNTIME_ADMISSION_LOCK, _CREATE_SLOTS), the object-store gate,
  # the in-memory runtime states of the no-database mode and the reaper all live
  # inside one process. A rolling update keeps old and new Pods serving side by
  # side for up to the 210s grace period: MAX_RUNTIMES can be exceeded twice
@@ -256,9 +256,16 @@ spec:
               mountPath: /var/run/sandbox-db
               readOnly: true
       volumes:
+ # 🔴 /tmp is where every large body is spooled (ticket uploads, export archives,
+ # checkpoints), and the kubelet's answer to an emptyDir over its sizeLimit is to
+ # evict the whole Pod - single replica, reaper included. The Control Plane takes
+ # its object-queue slot before the first body byte, so the most it can ever hold
+ # on this volume is SANDBOX_MAX_OBJECT_QUEUE (default 32) × MAX_STREAM_OBJECT_BYTES
+ # (64Mi above) = 2Gi. Keep this at or above that product when either changes;
+ # tests/test_object_upload_gate.py checks the arithmetic.
         - name: tmp
           emptyDir:
-            sizeLimit: 96Mi
+            sizeLimit: 2Gi
         - name: db-password
           secret:
             secretName: sandbox-postgres-auth

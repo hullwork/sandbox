@@ -21,7 +21,6 @@ from urllib.parse import parse_qs, urlparse
 import re
 import shutil
 import stat
-import tempfile
 import threading
 import time
 
@@ -132,28 +131,6 @@ def local_list_files(workspace_id: str, raw_path: str) -> dict:
     }
 
 
-def _local_atomic_write(path: Path, content: bytes) -> None:
-    """Temporary files in the same directory + rename overwrite, consistent with the writing method of file-service.
-
-    You cannot directly open(path, "wb"): the code in the runtime may be reading the same file.
-    Truncated writing will cause it to read half of the content, and this error only occurs during concurrency."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and not path.is_file():
-        raise ValueError("path is not a file")
-    handle_fd, temporary = tempfile.mkstemp(prefix="sandbox-", dir=path.parent)
-    try:
-        with os.fdopen(handle_fd, "wb") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-
-
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -230,7 +207,7 @@ def _open_workspace_file(workspace_id: str, parts: tuple[str, ...]) -> int:
 
 
 def _local_atomic_write_at(dir_fd: int, name: str, content: bytes) -> None:
-    """``_local_atomic_write`` addressed through a directory fd.
+    """Atomic same-directory write addressed through a directory fd.
 
     ``tempfile.mkstemp`` has no ``dir_fd``; the O_EXCL loop is what it does
     inside. The temporary lives in the same directory, so the final rename is
@@ -263,6 +240,29 @@ def _local_atomic_write_at(dir_fd: int, name: str, content: bytes) -> None:
         except FileNotFoundError:
             pass
 
+def _record_local_activity(workspace_id: str) -> None:
+    """Refresh `.sandbox/last_used_at` for a Workspace served through the volume role.
+
+    🔴 Why: file-service's record_activity is the only other writer of this marker, and it runs inside a
+       Runtime. A Workspace that is only ever read and written through the volume role - never given a
+       Runtime - therefore never gets a marker, and gc_workspaces falls back to the directory's mtime,
+       which writes inside subdirectories do not move. Thirty days after creation the CronJob deletes a
+       Workspace that was in use that morning.
+    Constraint: the marker must not decide the request. A read that succeeded is a read; failing it
+         because the metadata write did not land would be the wrong trade, so OSError is swallowed.
+    Constraint: never touch anything but the marker; `.sandbox` is off limits to callers (local_safe_path)
+         and this is the one legitimate write into it."""
+    try:
+        dir_fd = _open_workspace_directory(workspace_id, (".sandbox",), create=True)
+        try:
+            _local_atomic_write_at(
+                dir_fd, "last_used_at", f"{int(time.time())}\n".encode("ascii")
+            )
+        finally:
+            os.close(dir_fd)
+    except (OSError, ValueError):
+        pass
+
 
 def local_write_file(workspace_id: str, payload: dict) -> dict:
     """Local version /v1/files/write.
@@ -291,6 +291,7 @@ def local_write_file(workspace_id: str, payload: dict) -> dict:
         _local_atomic_write_at(dir_fd, parts[-1], encoded)
     finally:
         os.close(dir_fd)
+    _record_local_activity(workspace_id)
     return {
         "workspace_id": workspace_id,
         "path": _relative_display(root, path),
@@ -364,6 +365,7 @@ def local_read_file(
     if clipped_line:
         payload["clipped_line"] = clipped_line
         payload["clipped_length"] = clipped_length
+    _record_local_activity(workspace_id)
     return payload
 
 def local_create_workspace(workspace_id: str) -> dict:
@@ -391,8 +393,12 @@ def local_admit_workspace(workspace_id: str, maximum: int) -> dict:
     with _WORKSPACE_ADMISSION_LOCK:
         root = workspace_dir(workspace_id)
         if not root.is_dir():
+            # Same filter as local_list_workspaces: only directories named like a
+            # Workspace count. `lost+found` or an operator's stray directory used
+            # to take a slot of the quota without ever appearing in the listing.
             existing = sum(
                 child.is_dir()
+                and control_plane.WORKSPACE_ID.fullmatch(child.name) is not None
                 for child in Path(control_plane.WORKSPACE_VOLUME_ROOT).iterdir()
             )
             if existing >= maximum:

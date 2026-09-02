@@ -548,8 +548,11 @@ spec:
       serviceAccountName: sandbox-control-plane
       terminationGracePeriodSeconds: 210
       volumes:
+      # Sized to SANDBOX_MAX_OBJECT_QUEUE (32) × MAX_STREAM_OBJECT_BYTES (64Mi): the
+      # queue slot is taken before a body is spooled here, so that product is the
+      # ceiling on /tmp use. Exceeding sizeLimit evicts the Pod; see k8s/control-plane.yaml.
       - emptyDir:
-          sizeLimit: 96Mi
+          sizeLimit: 2Gi
         name: tmp
       - name: db-password
         secret:

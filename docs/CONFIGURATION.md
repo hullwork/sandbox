@@ -160,6 +160,7 @@ attributed to a person, so:
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_REAPER_SECONDS` | `60` | Seconds to wait for the reaper to finish its current round; the sum of the three shutdown values must stay below `terminationGracePeriodSeconds` |
 | `SANDBOX_IDLE_EVICT_SECONDS` | `300` | When the Runtime pool is full, a Runtime idle longer than this is released early to make room instead of answering `429`; shorter than the TTL |
 | `SANDBOX_MAX_INFLIGHT_CREATES` | `SANDBOX_MAX_RUNTIMES` | Background Runtime creations allowed at once; each holds a thread, so this bounds memory under a burst |
+| `SANDBOX_AUDIT_DENIAL_WINDOW_SECONDS` | `60` | Seconds during which repeated denied-access audit rows for the same credential, actor, action and target collapse into one, so a caller guessing ids cannot grow the audit table without bound |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Lifetime of the scoped Runtime access tokens the Control Plane mints |
 | `OBJECT_TICKET_TTL_SECONDS` | `900` | Upper bound on an object ticket's `expires_in`; every ticket is single-use through a Kubernetes Lease |
 | `MAX_STREAM_OBJECT_BYTES` | `67108864` (64 MiB) | Largest object streamed through the Control Plane |

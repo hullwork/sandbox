@@ -509,6 +509,26 @@ RUNTIME_HARD_TTL_SECONDS = int(
 WORKSPACE_IDLE_TTL_SECONDS = int(
     os.getenv("WORKSPACE_IDLE_TTL_SECONDS", "21600")
 )
+
+
+def workspace_ttl_advisory(idle_ttl: int, hard_ttl: int) -> str | None:
+    """The startup warning for WORKSPACE_IDLE_TTL_SECONDS <= SANDBOX_RUNTIME_HARD_TTL_SECONDS, or None.
+
+    A warning and not an assertion, on purpose: the defaults (6h idle vs 12h hard) have this shape in
+    every existing deployment, and refusing to start would take all of them down. The shape is survivable
+    now that Runtime life-cycle events and data-plane routes refresh the Workspace clock (touch_workspace);
+    it was fatal when only workspace admission did. It is still worth a line, because a client that
+    neither re-posts the lease nor touches the Workspace for idle_ttl seconds while its Runtime lives on
+    is a client whose data goes the round the Runtime dies."""
+    if idle_ttl > hard_ttl:
+        return None
+    return (
+        f"WORKSPACE_IDLE_TTL_SECONDS={idle_ttl} is not above "
+        f"SANDBOX_RUNTIME_HARD_TTL_SECONDS={hard_ttl}: a Workspace can reach its idle "
+        "limit while its Runtime is still alive, and is then swept in the round "
+        "the Runtime dies unless something refreshed it (file, object, checkpoint or "
+        "Runtime activity through the Control Plane does)."
+    )
 CHECKPOINT_RETENTION_SECONDS = int(
     os.getenv("CHECKPOINT_RETENTION_SECONDS", "2592000")
 )
@@ -612,7 +632,6 @@ if OBJECT_STORE_ADDRESSING_STYLE not in {"auto", "virtual", "path"}:
     raise ValueError(
         "OBJECT_STORE_ADDRESSING_STYLE must be auto, virtual, or path"
     )
-MC_CONFIG_LOCK = threading.Lock()
 for _name, _value in (
     ("SANDBOX_TTL_SECONDS", SANDBOX_TTL_SECONDS),
     ("WORKSPACE_IDLE_TTL_SECONDS", WORKSPACE_IDLE_TTL_SECONDS),
@@ -668,6 +687,48 @@ MAX_OBJECT_QUEUE = int(os.getenv("SANDBOX_MAX_OBJECT_QUEUE", "32"))
 if MAX_OBJECT_QUEUE <= 0:
     raise ValueError("SANDBOX_MAX_OBJECT_QUEUE must be greater than zero")
 _OBJECT_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_OBJECT_QUEUE)
+
+
+class DenialThrottle:
+    """Admit at most one audit row per (actor, action, target) per window; in-process, bounded.
+
+    🔴 Why: every ownership denial inserted a row in sandbox_audit_log with no throttle and no
+       retention. Any tenant key looping over guessed ids could grow the table without bound - disk
+       on the database, and list_audit slowing down for the operator who would want to read exactly
+       those rows. The signal the row carries is "this actor is probing this target"; the thousandth
+       repetition within a minute adds nothing to it.
+    Constraint: in-process only. Two replicas may each write one row per window; that is a bounded
+         duplicate, not a leak. Restarting the process forgets the window, which is also bounded.
+    Constraint: memory is bounded by `capacity`; the oldest entries go first. A flood across many
+         distinct targets therefore still writes at most one row per target per window and can evict
+         the window of a quieter actor early - one extra row for them, never a missing first row."""
+
+    def __init__(self, window_seconds: float, capacity: int) -> None:
+        if window_seconds <= 0 or capacity <= 0:
+            raise ValueError("window_seconds and capacity must be positive")
+        self.window_seconds = float(window_seconds)
+        self.capacity = int(capacity)
+        self._seen: dict[tuple, float] = {}
+        self._lock = threading.Lock()
+
+    def admit(self, key: tuple, now: float | None = None) -> bool:
+        """True when this key has not been admitted within the window (and records it)."""
+        current = time.monotonic() if now is None else float(now)
+        with self._lock:
+            last = self._seen.get(key)
+            if last is not None and current - last < self.window_seconds:
+                return False
+            # Re-insert at the end so eviction order follows last admission.
+            self._seen.pop(key, None)
+            while len(self._seen) >= self.capacity:
+                self._seen.pop(next(iter(self._seen)))
+            self._seen[key] = current
+            return True
+
+
+#: One denied-audit row per (credential kind, actor, action, target) per minute.
+AUDIT_DENIAL_WINDOW_SECONDS = float(os.getenv("SANDBOX_AUDIT_DENIAL_WINDOW_SECONDS", "60"))
+DENIED_AUDITS = DenialThrottle(AUDIT_DENIAL_WINDOW_SECONDS, 4096)
 
 
 # --- Metrics ----------------------------------------------------------------
@@ -987,14 +1048,50 @@ class ObjectStoreUnavailable(ObjectStoreBusy):
        Endpoints, and those routes must give a "retryable" answer themselves."""
 
 
+#: Per-thread marker: "this thread already holds a queue slot through object_queue_slot".
+_OBJECT_GATE_LOCAL = threading.local()
+
+
+@contextlib.contextmanager
+def object_queue_slot() -> Any:
+    """Hold a queue slot for a whole request, body included, not only for the store call.
+
+    🔴 Why this exists: the three paths that spool a large body to /tmp (ticket upload, workspace
+       export archive, checkpoint) used to read the whole body **first** and only then enter the gate
+       inside object_put. SANDBOX_MAX_OBJECT_QUEUE therefore bounded nothing about the spooling itself:
+       ThreadingHTTPServer has no thread cap, so N concurrent 64MiB uploads meant N × 64MiB on the tmp
+       emptyDir before any of them was refused. The emptyDir has a sizeLimit, and the kubelet's answer
+       to exceeding it is to evict the whole Pod - single replica, reaper included.
+       Taking the queue slot before the first body byte turns the N+1-th request into a 503 with nothing
+       spooled, and makes `MAX_OBJECT_QUEUE × MAX_STREAM_OBJECT_BYTES` the real ceiling on /tmp use,
+       which is what the manifests size the volume to.
+    Constraint: the store call inside still goes through object_slot, which sees the marker and does not
+         take a second queue slot (it would count one request twice and refuse at half the depth); it
+         does take the execution slot as usual. object_slot nested in object_slot is **not** made
+         re-entrant by this - that is a different situation and must keep refusing."""
+    if getattr(_OBJECT_GATE_LOCAL, "queued", False):
+        yield
+        return
+    if not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
+        raise ObjectStoreBusy("object storage is busy; retry shortly")
+    _OBJECT_GATE_LOCAL.queued = True
+    try:
+        yield
+    finally:
+        _OBJECT_GATE_LOCAL.queued = False
+        _OBJECT_QUEUE_SLOTS.release()
+
+
 @contextlib.contextmanager
 def object_slot() -> Any:
     """Enter the object-operation gate. When the queue is full, fail immediately instead of waiting.
 
     Constraint: the order of the two gates cannot be reversed - take the queue slot first, then the execution slot. The other way round, the thread blocks
-         on the execution slot first and the queue slot is useless."""
+         on the execution slot first and the queue slot is useless.
+    A thread already queued through object_queue_slot keeps that slot and takes only the execution slot."""
     global _OBJECT_INFLIGHT
-    if not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
+    queued_here = not getattr(_OBJECT_GATE_LOCAL, "queued", False)
+    if queued_here and not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
         raise ObjectStoreBusy("object storage is busy; retry shortly")
     with _OBJECT_INFLIGHT_LOCK:
         _OBJECT_INFLIGHT += 1
@@ -1004,7 +1101,8 @@ def object_slot() -> Any:
     finally:
         with _OBJECT_INFLIGHT_LOCK:
             _OBJECT_INFLIGHT -= 1
-        _OBJECT_QUEUE_SLOTS.release()
+        if queued_here:
+            _OBJECT_QUEUE_SLOTS.release()
 _RUNTIME_ADMISSION_LOCK = threading.Lock()
 TICKET_LEASE_SELECTOR = "convee.io/purpose=object-ticket"
 
@@ -1624,7 +1722,12 @@ MAX_LIST_ENTRIES = int(os.getenv("SANDBOX_MAX_LIST_ENTRIES", "10000"))
 if MAX_LIST_ENTRIES <= 0:
     raise ValueError("SANDBOX_MAX_LIST_ENTRIES must be greater than zero")
 
-_OUTAGE_STATUS = frozenset({500, 502, 503, 504})
+#: 429 sits with the 5xx: "slow down" is an instruction to wait, and the only
+#: wrong answer is to send the caller off to change a request that was fine.
+#: Some stores say it with a 503 and the code SlowDown instead; the code is
+#: honoured on its own so the classification does not depend on which spelling.
+_OUTAGE_STATUS = frozenset({429, 500, 502, 503, 504})
+_OUTAGE_CODES = frozenset({"SlowDown", "Throttling", "RequestLimitExceeded"})
 #: Transport failures: the request never got an answer. Named rather than
 #: inlined so a test can assert every one of them has a sample -- a branch
 #: nobody ever fed a matching value to is indistinguishable from one that
@@ -1652,14 +1755,41 @@ def failure_is_outage(error: BaseException) -> bool:
         status = (
             error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         )
-        return status in _OUTAGE_STATUS
+        code = str(error.response.get("Error", {}).get("Code") or "")
+        return status in _OUTAGE_STATUS or code in _OUTAGE_CODES
     return isinstance(error, _OUTAGE_EXCEPTIONS)
 
 
+class ObjectNotFound(FileNotFoundError):
+    """The store answered, and the answer was "no such object".
+
+    A FileNotFoundError so the API layer can answer 404 instead of the 400 every other rejection
+    gets: a caller that mistyped a checkpoint id and a caller whose credentials are wrong used to
+    receive the same sentence, and neither could tell which of the two to fix."""
+
+
+def _client_status(error: BaseException) -> int | None:
+    if not isinstance(error, ClientError):
+        return None
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return int(status) if isinstance(status, int) else None
+
+
 def _translate(error: BaseException) -> BaseException:
+    """The exception the caller sees. Never the store's own text (see failure_is_outage)."""
     if failure_is_outage(error):
         return ObjectStoreUnavailable(
             "object storage is unreachable; retry shortly"
+        )
+    status = _client_status(error)
+    if status == 404:
+        return ObjectNotFound("object not found")
+    if status == 403:
+        # The request was understood and refused on identity: the caller should
+        # look at the credentials and the bucket policy, not at the request.
+        return RuntimeError(
+            "object storage refused access; check the object storage "
+            "credentials and bucket policy"
         )
     return RuntimeError("object storage rejected the operation")
 
@@ -1715,7 +1845,17 @@ def object_put(
     )
 
 
-def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
+def object_get(
+    bucket: str,
+    key: str,
+    max_bytes: int,
+    *,
+    expected_sha256: str | None = None,
+) -> bytes:
+    """Read one object whole, refusing anything that is not provably the whole object.
+
+    `expected_sha256` is the caller's own record of the content (checkpoint metadata, a ticket); it is
+    the only thing that can vouch for a body the store did not declare a length for."""
     def read() -> bytes:
         response = object_store().get_object(Bucket=bucket, Key=key)
         # Not `with response["Body"]`: StreamingBody.__enter__ returns its
@@ -1738,8 +1878,30 @@ def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
         # mid-object hands back the prefix and no error -- and get_object()
         # hashes that prefix and returns a self-consistent, wrong answer.
         # `mc cat` used to catch this with its exit code.
+        #
+        # 🔴 The comparison must hold for a declared length **above** the ceiling
+        # too. The read asks for max_bytes + 1, so an object declared larger than
+        # that is expected to deliver exactly max_bytes + 1 bytes (and be refused
+        # above as too large); delivering fewer means the connection died before
+        # the ceiling, and the prefix must not come back as a legal small object.
+        # The earlier `declared <= max_bytes and` guard skipped exactly that case.
         declared = response.get("ContentLength")
-        if declared is not None and declared <= max_bytes and len(data) != declared:
+        if declared is None:
+            # No length to check against: only the caller's own digest can vouch
+            # for the body. Without one, refuse rather than trust a chunked body.
+            if expected_sha256 is None:
+                raise ObjectStoreUnavailable(
+                    "object storage is unreachable; retry shortly"
+                )
+            if not hmac.compare_digest(
+                hashlib.sha256(data).hexdigest(), expected_sha256
+            ):
+                raise ObjectStoreUnavailable(
+                    "object storage is unreachable; retry shortly"
+                )
+            return data
+        expected = min(int(declared), max_bytes + 1)
+        if len(data) != expected:
             raise ObjectStoreUnavailable(
                 "object storage is unreachable; retry shortly"
             )
@@ -1766,6 +1928,53 @@ def object_list(bucket: str, prefix: str) -> list[dict[str, Any]]:
                 # fetching, not to discover afterwards how much was fetched.
                 raise ValueError("object storage listing is too large")
         return items
+
+    return object_call("list", listing)
+
+
+def object_list_page(
+    bucket: str,
+    prefix: str,
+    *,
+    continuation_token: str | None = None,
+    page_size: int = 1000,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """One page of a listing, and the token for the next one (None on the last page).
+
+    Responsibility: the bounded form of object_list for callers that walk a prefix of unknown
+         size and act on each page as it arrives - the checkpoint GC sweeps the whole bucket.
+    🔴 Why not object_list: it accumulates and refuses past MAX_LIST_ENTRIES. That is right for a
+       response body, and wrong for a sweep whose job is to make the count go down: once the bucket
+       held more checkpoint objects than the ceiling, every GC round raised before deleting anything,
+       and nothing else ever removed them - the sweep stopped for good and the bucket only grew.
+       A page holds the gate for one round trip and at most page_size rows; memory is bounded by the
+       page, not by the bucket.
+    Constraint: page_size is capped by MAX_LIST_ENTRIES so the per-call ceiling stays the same."""
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+    page_size = min(page_size, MAX_LIST_ENTRIES)
+
+    def listing() -> tuple[list[dict[str, Any]], str | None]:
+        kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Prefix": prefix,
+            "MaxKeys": page_size,
+        }
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+        page = object_store().list_objects_v2(**kwargs)
+        items = [
+            {
+                "key": item["Key"],
+                "bytes": int(item.get("Size") or 0),
+                "last_modified": _timestamp(item.get("LastModified")),
+            }
+            for item in page.get("Contents") or []
+        ]
+        next_token = (
+            page.get("NextContinuationToken") if page.get("IsTruncated") else None
+        )
+        return items, (str(next_token) if next_token else None)
 
     return object_call("list", listing)
 
@@ -1858,7 +2067,15 @@ def object_delete_versions(bucket: str, key: str) -> None:
     """Delete the object and every version and delete marker it has.
 
     `mc rm --versions --force` in one call; there is no single S3 verb for it.
-    """
+
+    🔴 One delete_object per version, not one delete_objects per thousand. DeleteObjects is an
+       operation botocore marks as checksum-**required**, so `request_checksum_calculation=
+       "when_required"` (see object_store) does not stop it from sending and signing
+       x-amz-checksum-crc32 - verified on the wire. The stores this platform says it supports
+       (older Ceph RGW, MinIO) answer 400 or 501 to that header, which turned every versioned purge
+       on them into a "rejected" and, in the reaper, stopped the checkpoint sweep at its first
+       expired object. delete_object with a VersionId carries no checksum requirement. The cost is
+       one round trip per version; a checkpoint key has a handful."""
     def purge() -> None:
         store = object_store()
         paginator = store.get_paginator("list_object_versions")
@@ -1876,10 +2093,9 @@ def object_delete_versions(bucket: str, key: str) -> None:
         if not targets:
             store.delete_object(Bucket=bucket, Key=key)
             return
-        for start in range(0, len(targets), 1000):
-            store.delete_objects(
-                Bucket=bucket,
-                Delete={"Objects": targets[start:start + 1000], "Quiet": True},
+        for target in targets:
+            store.delete_object(
+                Bucket=bucket, Key=target["Key"], VersionId=target["VersionId"]
             )
 
     object_call("delete", purge)
@@ -2071,7 +2287,8 @@ def put_object_bytes(
         str(expected_digest), digest
     ):
         raise ValueError("sha256 does not match content")
-    with tempfile.SpooledTemporaryFile(
+    # The queue slot is taken before anything touches /tmp; see object_queue_slot.
+    with object_queue_slot(), tempfile.SpooledTemporaryFile(
         max_size=1024 * 1024,
         mode="w+b",
         dir="/tmp",
@@ -2532,6 +2749,13 @@ def checkpoint_workspace(workspace_id: str) -> dict[str, Any]:
     if not WORKSPACE_ID.fullmatch(workspace_id):
         raise ValueError("invalid workspace_id")
     sandbox_id = require_runtime_for(workspace_id, "checkpoint")
+    # The archive is read into memory by internal_http and then spooled; both must
+    # sit inside the queue slot or the gate bounds neither (object_queue_slot).
+    with object_queue_slot():
+        return _checkpoint_workspace_gated(workspace_id, sandbox_id)
+
+
+def _checkpoint_workspace_gated(workspace_id: str, sandbox_id: str) -> dict[str, Any]:
     status, archive, content_type = internal_http(
         "GET",
         f"{runtime_endpoint(sandbox_id)}/v1/files/checkpoint",
@@ -2582,7 +2806,10 @@ def restore_workspace_checkpoint(
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"workspaces/{workspace_id}/checkpoints/{checkpoint_id}.tar.gz"
     archive = object_get(
-        OBJECT_STORE_WORKSPACE_BUCKET, key, MAX_STREAM_OBJECT_BYTES
+        OBJECT_STORE_WORKSPACE_BUCKET,
+        key,
+        MAX_STREAM_OBJECT_BYTES,
+        expected_sha256=expected_sha256 or None,
     )
     digest = hashlib.sha256(archive).hexdigest()
     if expected_sha256 and not hmac.compare_digest(expected_sha256, digest):
@@ -2669,8 +2896,13 @@ def delete_workspace_checkpoint(
     prefix = _checkpoint_prefix(workspace_id)
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"{prefix}{checkpoint_id}.tar.gz"
+    history_retained = False
     try:
         object_delete_versions(OBJECT_STORE_WORKSPACE_BUCKET, key)
+    except ObjectStoreBusy:
+        # Busy / unreachable is not "this store has no versioning"; retrying a
+        # plain delete would mask an outage as a success with history left behind.
+        raise
     except RuntimeError:
         # S3-compatible stores are not required to implement object
         # versioning. Aliyun OSS in compatibility mode rejects versioned
@@ -2678,11 +2910,15 @@ def delete_workspace_checkpoint(
         # succeeds; without this fallback every workspace purge on such a
         # store fails and leaks the ownership quota row forever.
         object_delete(OBJECT_STORE_WORKSPACE_BUCKET, key)
+        # 🔴 Say what happened: a plain delete on a versioned store leaves the
+        # versions (and writes a delete marker). Reporting False here told the
+        # caller the history was gone when it was not.
+        history_retained = True
     return {
         "workspace_id": workspace_id,
         "checkpoint_id": checkpoint_id,
         "deleted": True,
-        "history_retained": False,
+        "history_retained": history_retained,
     }
 
 
@@ -2764,12 +3000,36 @@ def _admit_new_runtime(maximum: int) -> None:
         )
 
 
+def touch_workspace(workspace_id: str) -> None:
+    """Refresh the store's idle clock for a Workspace that was just used. Never fails the caller.
+
+    Responsibility: the one entry point for "this Workspace is in use" on the control-plane side; the
+         store throttles the write (Store.touch_workspace), so calling it on every request is cheap.
+    🔴 Why it must be called from the Runtime life cycle and the data routes, not only from workspace
+       admission: the reaper's idle verdict reads **only** sandbox_workspaces.last_used_at (never the
+       volume marker, which the tenant can forge). Before this, only POST /v1/workspaces wrote it, so a
+       client holding a lease for 6h+ without re-posting lost its Workspace the round its Runtime died.
+    Constraint: a store failure here is logged and swallowed - the request already passed its gates and
+         the idle window is hours; failing a file write because the touch did not land is the wrong
+         trade. Silent is not acceptable either, so the skip leaves a line."""
+    if STORE is None or not workspace_id:
+        return
+    try:
+        STORE.touch_workspace(workspace_id)
+    except StoreError as exc:
+        print(f"warning: workspace touch skipped for {workspace_id}: {exc}", flush=True)
+
+
 def touch_runtime(sandbox_id: str, now: int | None = None) -> RuntimeInstance:
     current = now or int(time.time())
-    return configured_runtime_driver().touch_runtime(
+    instance = configured_runtime_driver().touch_runtime(
         sandbox_id,
         current + SANDBOX_TTL_SECONDS,
     )
+    # A Runtime kept alive is a Workspace in use; see touch_workspace for why the
+    # store must hear about it and not only about workspace admission.
+    touch_workspace(instance.workspace_id)
+    return instance
 
 
 def volume_agent_request(
@@ -3054,11 +3314,35 @@ def ensure_runtime(
             # before the HTTP 201 arrives; a retry must reuse that Pod instead
             # of consuming another runtime slot.
             existing = driver.list_for_workspace(workspace_id)
+            now = int(time.time())
             for candidate in existing:
                 if not candidate.provider_id or not candidate.runtime_id:
                     continue
+                if candidate.hard_expires_at and candidate.hard_expires_at <= now:
+                    # Past the absolute ceiling: the reaper deletes it within a
+                    # round, busy or not, and no touch moves that ceiling. Handing
+                    # it out would be handing out a sandbox with seconds to live.
+                    continue
                 if not candidate.ready:
                     candidate = wait_for_runtime(candidate.runtime_id)
+                if candidate.expires_at and candidate.expires_at <= now:
+                    # 🔴 Expired when listed: the reaper may be in the middle of
+                    # deleting it this very round (its busy probe alone takes up
+                    # to 2s). The touch moves expires-at forward, which a reaper
+                    # that re-reads before deleting honours (reap_once); a delete
+                    # that had already passed that check still lands, so confirm
+                    # the Runtime is still there before returning it. Gone means
+                    # "create a new one", not an error.
+                    try:
+                        touch_runtime(candidate.runtime_id)
+                    except RuntimeDriverError as exc:
+                        if exc.code == RuntimeDriverErrorCode.NOT_FOUND:
+                            continue
+                        raise
+                    alive = runtime_exists(candidate.runtime_id)
+                    if alive is None:
+                        continue
+                    return alive
                 touch_runtime(candidate.runtime_id)
                 return candidate
             pod = runtime_exists(sandbox_id)
@@ -3114,6 +3398,9 @@ def ensure_runtime(
                 f"runtime {sandbox_id} was released while starting up",
             )
         RUNTIME_CREATE_SECONDS.observe(time.monotonic() - started_at)
+        # The reuse branch above touches through touch_runtime; a fresh Runtime is
+        # the same signal for the Workspace's idle clock.
+        touch_workspace(workspace_id)
         return pod
     except Exception as exc:
         RUNTIME_CREATE_FAILURES.inc(reason=create_failure_reason(exc))
@@ -3263,7 +3550,10 @@ def delete_runtime(sandbox_id: str) -> None:
         # GET /v1/sandboxes/{id} still reports active.
         release_runtime_state(UNTENANTED_RUNTIME, sandbox_id)
         return
+    workspace_id = ""
     try:
+        record = STORE.get_runtime(sandbox_id)
+        workspace_id = str((record or {}).get("workspace_id") or "")
         owner = STORE.runtime_owner(sandbox_id)
         if owner:
             STORE.release_runtime(owner, sandbox_id)
@@ -3275,6 +3565,11 @@ def delete_runtime(sandbox_id: str) -> None:
             f"survives until reconciled: {exc}",
             flush=True,
         )
+    # 🔴 The Runtime dying is the moment the Workspace's idle clock should **start**, not the moment it
+    # should be found already expired: the reaper sweeps idle Workspaces in the same round it deletes
+    # expired Runtimes, and a Workspace whose only activity went through its Runtime has a stale column.
+    # Read from the store row rather than the Pod: the Pod is already gone at this point.
+    touch_workspace(workspace_id)
 
 
 def remove_workspace_data(workspace_id: str) -> dict[str, Any]:
@@ -3447,6 +3742,7 @@ def workspace_view(
     runtime_attached: bool,
     *,
     tenant_id: str | None = None,
+    recorded_last_used_at: str | None = None,
 ) -> dict:
     """Interface model: read-only view of a Workspace.
 
@@ -3464,13 +3760,22 @@ def workspace_view(
     AI-LOCK: idle_expires_at and runtime_attached must be read together. The reclaim criterion is
          `reap_once`'s "**no active Runtime** and last_used_at + IDLE_TTL
          has passed" - looking at the time alone leads to the wrong conclusion "should have been reclaimed long ago but is still there", which is
-         the normal situation while a Runtime is attached. The two fields are presented separately to keep people from reading only one."""
+         the normal situation while a Runtime is attached. The two fields are presented separately to keep people from reading only one.
+
+    🔴 Two clocks, and only one of them decides. `last_used_at` in the view is the volume marker (file
+       activity inside the sandbox refreshes it; the tenant can also forge it). The reaper's verdict reads
+       the store column (idle_workspaces), which touch_workspace refreshes. `recorded_last_used_at` is
+       that column; when the caller supplies it, `idle_expires_at` is derived from it so the countdown
+       shown is the countdown the reaper runs. Without it (no store, legacy rows) the marker is the only
+       clock there is and the old derivation stands. The Workspace schema forbids extra fields, so the
+       store value is not exposed as a field of its own."""
     last_used_at = entry.get("last_used_at") or entry.get("created_at")
     idle_expires_at = None
-    if not runtime_attached and last_used_at:
+    reclaim_clock = recorded_last_used_at or last_used_at
+    if not runtime_attached and reclaim_clock:
         try:
             idle_expires_at = str(
-                int(last_used_at) + WORKSPACE_IDLE_TTL_SECONDS
+                int(reclaim_clock) + WORKSPACE_IDLE_TTL_SECONDS
             )
         except (TypeError, ValueError):
             idle_expires_at = None
@@ -3609,8 +3914,10 @@ SHUTDOWN_INFLIGHT_SECONDS = float(
 # Wait for the reaper to finish its current round. Also an upper limit: most of the time it is sitting in
 # _SHUTTING_DOWN.wait(15), and returns as soon as the event is set.
 #
-# 🔴 Deliberately does **not** cover the worst case: one round's checkpoint GC calls mc, whose timeout is 180s.
-# Holding the Pod another three minutes for that is not worth it - checkpoint / ticket GC is fully idempotent and continues next
+# 🔴 Deliberately does **not** cover the worst case: one round's checkpoint GC walks the whole bucket one
+# page at a time (object_list_page), each page a gated call with `read_timeout=60` per socket read, so a
+# round has no overall ceiling - a slow store and a large bucket can take many minutes. Holding the Pod for
+# that is not worth it - checkpoint / ticket GC is fully idempotent and continues next
 # time; a delete_runtime cut off halfway (Pod deleted but quota not yet returned) is covered by the two-way reconciliation.
 # This value governs a regular round: activity probes of 2s×N plus a few K8s round trips.
 SHUTDOWN_REAPER_SECONDS = float(

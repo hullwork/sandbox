@@ -24,6 +24,7 @@ import pathlib
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -417,6 +418,58 @@ class VolumeAbsentTests(unittest.TestCase):
         core.WORKSPACE_VOLUME_ROOT = ""
         with self.assertRaises(core.WorkspaceOffline):
             volume.workspace_dir(WORKSPACE)
+
+
+class LocalActivityMarkerTests(WorkspaceFixture):
+    """The volume role writes ``.sandbox/last_used_at`` on its own reads and writes.
+
+    ``gc_workspaces.py`` reads that marker and falls back to the directory's
+    mtime without it. Only file-service wrote it, and file-service runs inside
+    a Runtime, so a Workspace served purely through the volume role had no
+    marker, and writes inside subdirectories do not move the root's mtime: the
+    CronJob would delete a Workspace in daily use thirty days after creation.
+    """
+
+    def marker(self) -> int:
+        return int((self.ws_dir / ".sandbox" / "last_used_at").read_text(encoding="ascii"))
+
+    def test_a_write_records_activity(self) -> None:
+        self.assertFalse((self.ws_dir / ".sandbox" / "last_used_at").exists())
+        volume.local_write_file(self.workspace, {"path": "src/new.py", "content": "x"})
+        self.assertAlmostEqual(self.marker(), int(time.time()), delta=5)
+
+    def test_a_read_records_activity(self) -> None:
+        volume.local_read_file(self.workspace, "src/main.py")
+        self.assertAlmostEqual(self.marker(), int(time.time()), delta=5)
+
+    def test_a_stale_marker_is_moved_forward(self) -> None:
+        (self.ws_dir / ".sandbox" / "last_used_at").write_text("1000\n", encoding="ascii")
+        volume.local_read_file(self.workspace, "src/main.py")
+        self.assertGreater(self.marker(), 1000)
+
+    def test_a_failed_read_does_not_touch_the_marker(self) -> None:
+        with self.assertRaises(ValueError):
+            volume.local_read_file(self.workspace, "src/missing.py")
+        self.assertFalse((self.ws_dir / ".sandbox" / "last_used_at").exists())
+
+
+class AdmissionCountTests(WorkspaceFixture):
+    """Quota counts Workspace directories, with the same filter the listing uses."""
+
+    def test_directories_that_are_not_workspaces_take_no_slot(self) -> None:
+        (self.root / "lost+found").mkdir()
+        (self.root / "not-a-workspace").mkdir()
+        # One real Workspace exists (the fixture's); maximum=2 leaves one slot,
+        # which the two stray directories must not have used up.
+        result = volume.local_admit_workspace("ws-fedcba987654", 2)
+        self.assertTrue(result["created"])
+        self.assertTrue((self.root / "ws-fedcba987654").is_dir())
+
+    def test_the_quota_still_bites_on_real_workspaces(self) -> None:
+        (self.root / "ws-fedcba987654").mkdir()
+        with self.assertRaises(core.KubeError):
+            volume.local_admit_workspace("ws-0000000000ff", 2)
+        self.assertFalse((self.root / "ws-0000000000ff").exists())
 
 
 if __name__ == "__main__":

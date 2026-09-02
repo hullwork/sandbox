@@ -937,10 +937,19 @@ class ApiHandler(BaseHTTPRequestHandler):
            Use indicators + logs to make the fact that "auditing is failing" itself observable."""
         if control_plane.STORE is None:
             return
+        actor_kind = self.credential_kind()
+        actor_id = self.actor_id()
+        if outcome == "denied" and not control_plane.DENIED_AUDITS.admit(
+            (actor_kind, actor_id, action, target)
+        ):
+            # The same actor was already recorded probing the same target within
+            # the window; a repeat adds no signal and unbounded repeats fill the
+            # table (see DenialThrottle).
+            return
         try:
             control_plane.STORE.record_audit(
-                actor_kind=self.credential_kind(),
-                actor_id=self.actor_id(),
+                actor_kind=actor_kind,
+                actor_id=actor_id,
                 action=action,
                 target=target,
                 outcome=outcome,
@@ -1173,7 +1182,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
     def scope_workspaces(
         self, entries: list[dict]
-    ) -> tuple[list[dict], dict[str, str]]:
+    ) -> tuple[list[dict], dict[str, str], dict[str, str]]:
         """Converge the Workspaces listed on the volume to the range visible for this request.
 
         🔴 This is where the current overreach stops. The volume is a directory of all tenants. Without filtering, it is equal to any
@@ -1181,18 +1190,26 @@ class ApiHandler(BaseHTTPRequestHandler):
         entrance.
 
         The management plane (tenant_id is None) looks at all, and also brings ownership; tenants only look at their own.
-        When STORE is not configured, it degrades to single tenant and behaves the same as before."""
+        When STORE is not configured, it degrades to single tenant and behaves the same as before.
+
+        The third value is the store's last_used_at per Workspace - the clock the reaper actually runs
+        (see workspace_view's recorded_last_used_at); it is returned for every visible Workspace."""
         if control_plane.STORE is None:
-            return entries, {}
+            return entries, {}, {}
         owned = control_plane.STORE.list_workspaces(self.tenant_id)
         owners = {row["workspace_id"]: row["tenant_id"] for row in owned}
+        recorded = {
+            row["workspace_id"]: row["last_used_at"]
+            for row in owned
+            if row.get("last_used_at")
+        }
         if self.tenant_id is None:
             #Only global views return ownership. When representing a tenant, the column is always equal to itself.
             #It would be better not to give one extra column for nothing.
-            return entries, owners
+            return entries, owners, recorded
         # Directories without an ownership row in the store are invisible to tenants. They are either pre-multi-tenant stock
         #(the migration script will claim it), or it has been manually stuffed into the volume - neither of which should be visible to tenants.
-        return [e for e in entries if e.get("id") in owners], {}
+        return [e for e in entries if e.get("id") in owners], {}, recorded
 
     def scope_sandboxes(self, runtimes: list[control_plane.RuntimeInstance]) -> list[dict]:
         """Runtimes converge according to their Workspace ownership.
@@ -1680,11 +1697,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise ValueError("object exceeds ticket size limit")
         digest = hashlib.sha256()
-        with tempfile.SpooledTemporaryFile(
-            max_size=1024 * 1024,
-            mode="w+b",
-            dir="/tmp",
-        ) as upload:
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(control_plane.object_queue_slot())
+            except control_plane.ObjectStoreBusy:
+                # Refused before the first body byte: nothing is spooled, and
+                # the unread body means this connection cannot be reused.
+                self.close_connection = True
+                raise
+            upload = stack.enter_context(
+                tempfile.SpooledTemporaryFile(
+                    max_size=1024 * 1024,
+                    mode="w+b",
+                    dir="/tmp",
+                )
+            )
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(1024 * 1024, remaining))
@@ -2100,6 +2127,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.list_workspace_checkpoints(workspace_id),
@@ -2116,6 +2144,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 #The write subset (write|write-binary|edit in do_POST) does not move.
                 if not self.require_workspace_read_auth(workspace_id):
                     return
+                # After the gate, before the side effect: an unowned id must
+                # not refresh anyone's idle clock.
+                control_plane.touch_workspace(workspace_id)
                 query = parse_qs(parsed.query, keep_blank_values=True)
                 self.proxy_workspace(
                     "GET",
@@ -2244,7 +2275,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 _, listing, _ = control_plane.volume_agent_request("GET", "/v1/workspaces")
                 entries = json.loads(listing).get("workspaces", [])
                 try:
-                    entries, owners = self.scope_workspaces(entries)
+                    entries, owners, recorded = self.scope_workspaces(entries)
                 except StoreError as exc:
                     self.send_json(
                         HTTPStatus.SERVICE_UNAVAILABLE,
@@ -2259,6 +2290,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                                 entry,
                                 entry.get("id") in attached,
                                 tenant_id=owners.get(entry.get("id")),
+                                recorded_last_used_at=recorded.get(entry.get("id")),
                             )
                             for entry in entries
                         ]
@@ -2311,6 +2343,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # ObjectNotFound: the store said "no such object". An OSError, so it
+            # must be caught ahead of the 400 catch-all below.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2369,6 +2405,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.CREATED,
                     control_plane.checkpoint_workspace(workspace_id),
@@ -2385,6 +2422,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, checkpoint_id = match.groups()
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 payload = self.read_json()
                 self.send_json(
                     HTTPStatus.OK,
@@ -2403,9 +2441,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
-                #The active time is written on the volume by the file-service's record_activity
-                #.sandbox/last_used_at, Control Plane will not be recorded again - Workspace has been
-                #There are no Pods available for patch annotation.
+                # The volume marker (.sandbox/last_used_at) is file-service's; the
+                # reaper's clock is the store column, refreshed here.
+                control_plane.touch_workspace(workspace_id)
                 payload = control_plane.bind_object_owner(
                     self.read_json(),
                     control_plane.scoped_object_owner(self.scoped_claims),
@@ -2457,9 +2495,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id = match.group(1)
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
-                #The active time is written on the volume by the file-service's record_activity
-                #.sandbox/last_used_at, Control Plane will not be recorded again - Workspace has been
-                #There are no Pods available for patch annotation.
+                # See objects/import: the store column is the reaper's clock.
+                control_plane.touch_workspace(workspace_id)
                 payload = control_plane.bind_object_owner(
                     self.read_json(),
                     control_plane.scoped_object_owner(self.scoped_claims),
@@ -3007,6 +3044,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, operation = match.groups()
                 if not self.require_scoped_auth("workspace", workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.proxy_workspace(
                     "POST",
                     workspace_id,
@@ -3037,6 +3075,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # See do_GET: ObjectNotFound, ahead of the OSError catch-all.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -3064,6 +3105,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(exc.status, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -3096,6 +3139,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 workspace_id, checkpoint_id = match.groups()
                 if not self.require_workspace_tenant(workspace_id):
                     return
+                control_plane.touch_workspace(workspace_id)
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.delete_workspace_checkpoint(workspace_id, checkpoint_id),
@@ -3294,5 +3338,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
