@@ -100,7 +100,7 @@ spec:
  # This file does not give default values because local deployment side-loads images.
  # The local image has no registry prefix; production operators should configure one.
  # Fill in the registry cluster yourself, for example:
-            #   value: ghcr.io/convee/,registry.local/sandbox/
+            #   value: ghcr.io/hullwork/,registry.local/sandbox/
  # The prefix is a literal prefix and does not imply directory boundaries: if you want directory semantics, just write the trailing `/` yourself.
  # The built-in templates (SANDBOX_TEMPLATES) are not bound by it - both belong to the deployment configuration.
             # - name: SANDBOX_IMAGE_REGISTRIES

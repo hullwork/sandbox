@@ -34,7 +34,7 @@ sha256sum -c SHA256SUMS
 kubectl apply --dry-run=client -f sandbox-vX.Y.Z.yaml
 cosign verify-blob --bundle sandbox_platform-*.whl.sigstore.json sandbox_platform-*.whl
 gh attestation verify sandbox_platform-*.whl --repo "$GITHUB_REPOSITORY"
-cosign verify ghcr.io/convee/sandbox-control-plane@sha256:<digest> \
+cosign verify ghcr.io/hullwork/sandbox-control-plane@sha256:<digest> \
   --certificate-identity-regexp '.*/.github/workflows/release.yml' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```

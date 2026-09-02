@@ -26,7 +26,7 @@ class ReleaseManifestTests(unittest.TestCase):
                 json.dumps(
                     {
                         "component": component,
-                        "image": f"ghcr.io/convee/sandbox-{component}",
+                        "image": f"ghcr.io/hullwork/sandbox-{component}",
                         "digest": "sha256:" + ("a" * 64),
                     }
                 ),

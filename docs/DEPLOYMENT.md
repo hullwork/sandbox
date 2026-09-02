@@ -5,7 +5,7 @@
 The product-owned chart in `charts/sandbox` is the portable deployment
 contract. It does not require an Infra repository and can be consumed directly
 by Helm, Argo CD, Flux, or another OCI-aware GitOps controller. Release tags
-publish it to `oci://ghcr.io/convee/charts/sandbox`.
+publish it to `oci://ghcr.io/hullwork/charts/sandbox`.
 
 ```bash
 helm lint charts/sandbox

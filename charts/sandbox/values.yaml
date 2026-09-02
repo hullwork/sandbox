@@ -1,20 +1,20 @@
 images:
   controlPlane:
-    repository: ghcr.io/convee/sandbox-control-plane
+    repository: ghcr.io/hullwork/sandbox-control-plane
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
   runtime:
-    repository: ghcr.io/convee/sandbox-runtime
+    repository: ghcr.io/hullwork/sandbox-runtime
     tag: "0.1.0"
     digest: ""
   fileService:
-    repository: ghcr.io/convee/sandbox-file-service
+    repository: ghcr.io/hullwork/sandbox-file-service
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
   console:
-    repository: ghcr.io/convee/sandbox-console
+    repository: ghcr.io/hullwork/sandbox-console
     tag: "0.1.0"
     digest: ""
     pullPolicy: IfNotPresent
