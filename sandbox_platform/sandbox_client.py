@@ -24,7 +24,11 @@ import urllib.request
 import uuid
 
 from sandbox_platform import __version__
-from sandbox_platform.control_plane_transport import ControlPlaneError, ControlPlaneTransport
+from sandbox_platform.control_plane_transport import (
+    ControlPlaneError,
+    ControlPlaneTransport,
+    urlopen_without_redirects,
+)
 
 PROTOCOL_VERSION = "2026-07-28"
 # Upper bound for settling interrupted SSE reader threads. After shutdown,
@@ -194,6 +198,20 @@ def normalize_workspace_path(path: str) -> str:
     if path.startswith("~/") or path == "~":
         raise ValueError("home paths are not available; use /workspace")
     return path
+
+
+def _required_str(result: object, key: str, what: str) -> str:
+    """Read a field the Control Plane contract promises, or say the response is broken.
+
+    Indexing ``result[key]`` reports a missing field as a KeyError, which the
+    CLI does not catch and the MCP bridge reports as an internal error. A
+    response without the field is the same fault as a response that is not a
+    list where one was promised, and ``list_runtimes`` already calls that 502.
+    """
+    value = result.get(key) if isinstance(result, dict) else None
+    if not isinstance(value, str) or not value:
+        raise ControlPlaneError(502, f"Control Plane response to {what} has no {key}")
+    return value
 
 
 class SandboxManager:
@@ -370,7 +388,7 @@ class SandboxManager:
             method=ticket["method"],
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urlopen_without_redirects(request, timeout=120) as response:
                 result = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raise ControlPlaneError(exc.code, "object-store blob upload failed") from exc
@@ -442,7 +460,7 @@ class SandboxManager:
             method="GET",
         )
         try:
-            return urllib.request.urlopen(request, timeout=30)
+            return urlopen_without_redirects(request, timeout=30)
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             try:
@@ -670,13 +688,13 @@ class SandboxManager:
                 "/v1/workspaces",
                 payload=payload,
             )
-            lease.workspace_id = result["workspace_id"]
+            lease.workspace_id = _required_str(result, "workspace_id", "POST /v1/workspaces")
             # An older Control Plane does not return this field. Preserve its
             # historical restore behavior during a rolling upgrade; the new
             # server always sends an explicit boolean.
             lease.workspace_created = result.get("created") is not False
             lease.workspace_owner = result.get("owner")
-            lease.workspace_token = result["access_token"]
+            lease.workspace_token = _required_str(result, "access_token", "POST /v1/workspaces")
             lease.workspace_token_expires_at = (
                 time.time() + int(result.get("access_token_expires_in", 600))
             )
@@ -733,7 +751,9 @@ class SandboxManager:
                         #Otherwise, when rebuilding below, the old template will be compared to a non-existent sandbox.
                         lease.sandbox_template = None
                     else:
-                        lease.sandbox_token = result["access_token"]
+                        lease.sandbox_token = _required_str(
+                            result, "access_token", "POST /v1/sandboxes/{id}/token"
+                        )
                         lease.sandbox_token_expires_at = (
                             time.time()
                             + int(result.get("access_token_expires_in", 600))
@@ -745,8 +765,8 @@ class SandboxManager:
             if template is not None:
                 payload["template_id"] = template
             result, _ = self._request("POST", "/v1/sandboxes", payload=payload)
-            lease.sandbox_id = result["id"]
-            lease.sandbox_token = result["access_token"]
+            lease.sandbox_id = _required_str(result, "id", "POST /v1/sandboxes")
+            lease.sandbox_token = _required_str(result, "access_token", "POST /v1/sandboxes")
             lease.sandbox_token_expires_at = (
                 time.time() + int(result.get("access_token_expires_in", 600))
             )
@@ -805,7 +825,9 @@ class SandboxManager:
                 payload={},
             )
             lease.sandbox_id = sandbox_id
-            lease.sandbox_token = token["access_token"]
+            lease.sandbox_token = _required_str(
+                token, "access_token", "POST /v1/sandboxes/{id}/token"
+            )
             lease.sandbox_token_expires_at = time.time() + int(
                 token.get("access_token_expires_in", 600)
             )
@@ -1046,7 +1068,7 @@ class SandboxManager:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
+            with urlopen_without_redirects(
                 request,
                 timeout=timeout_seconds + 15,
             ) as response:

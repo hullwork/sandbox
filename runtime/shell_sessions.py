@@ -79,6 +79,36 @@ def _validate_session_id(value: Any) -> str:
     return value
 
 
+def session_members(session_id: int) -> list[int]:
+    """Pids in ``/proc`` whose session id is ``session_id``, the leader excluded.
+
+    Background jobs (``cmd &``, ``nohup``) are in process groups of their
+    own - neither the shell's nor the foreground one the terminal names -
+    so neither killpg in ``ShellSession.close`` reaches them. The session
+    id is the one thing every descendant keeps: ``start_new_session`` made
+    the shell the leader, so it equals the shell's pid. Field 6 of
+    ``/proc/<pid>/stat`` is the session id; the comm field before it may
+    hold spaces and parentheses, hence the split on the last ``)``."""
+    members: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return members
+    wanted = str(session_id).encode()
+    for entry in entries:
+        if not entry.isdigit() or int(entry) == session_id:
+            continue
+        try:
+            with open(f"/proc/{entry}/stat", "rb") as handle:
+                fields = handle.read().rsplit(b")", 1)[-1].split()
+        except OSError:
+            continue
+        # After comm: state, ppid, pgrp, session, ...
+        if len(fields) > 3 and fields[3] == wanted:
+            members.append(int(entry))
+    return members
+
+
 class ShellSession:
     """One persistent bash process attached to a bounded PTY output ring."""
 
@@ -589,6 +619,13 @@ class ShellSession:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
+                pass
+        # Whatever the two killpg calls above did not reach - background jobs
+        # in groups of their own - still carries the session id.
+        for pid in session_members(self.process.pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 pass
         try:
             self.process.wait(timeout=KILL_REAP_SECONDS)

@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 from sandbox_platform import sandbox_cli
-from sandbox_platform.sandbox_client import CommandResult
+from sandbox_platform.sandbox_client import CommandResult, ControlPlaneError
 
 
 class SandboxCliTests(unittest.TestCase):
@@ -47,6 +47,28 @@ class SandboxCliTests(unittest.TestCase):
                 ["run", "--name", "demo", "--stop", "--", "false"]
             )
         self.assertEqual(code, 3)
+        sandbox.stop.assert_called_once_with()
+
+    def test_a_failed_stop_is_reported_but_keeps_the_command_exit_code(self) -> None:
+        # The command ran and exited 0; its output has already gone out. A stop
+        # failure replacing that 0 with 1 would tell the caller the command
+        # failed, which is the one thing that did not happen.
+        sandbox = mock.Mock()
+        sandbox.run_command.return_value = CommandResult(
+            exit_code=0, stdout="ok\n", stderr=""
+        )
+        sandbox.stop.side_effect = ControlPlaneError(502, "control plane away")
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                sandbox_cli.Sandbox, "get_or_create", return_value=sandbox
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(stderr),
+        ):
+            code = sandbox_cli.main(["run", "--name", "demo", "--stop", "--", "true"])
+        self.assertEqual(code, 0)
+        self.assertIn("stop failed: control plane away", stderr.getvalue())
         sandbox.stop.assert_called_once_with()
 
     def test_missing_command_is_a_clean_cli_error(self) -> None:

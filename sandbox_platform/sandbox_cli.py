@@ -88,7 +88,13 @@ def main(argv: list[str] | None = None) -> int:
                 return _run(sandbox, args.command, args.timeout)
             finally:
                 if args.stop:
-                    sandbox.stop()
+                    try:
+                        sandbox.stop()
+                    except ControlPlaneError as exc:
+                        # The command's exit code is what the caller asked
+                        # for. A failed stop is said on stderr and must not
+                        # replace it - the output above already went out.
+                        print(f"sandbox: stop failed: {exc}", file=sys.stderr)
         if args.action == "exec":
             _command(args.command)
             return _run(Sandbox.get(args.name, resume=True), args.command, args.timeout)
