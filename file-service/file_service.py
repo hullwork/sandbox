@@ -136,8 +136,8 @@ def safe_path(raw_path: str, *, allow_root: bool = False) -> Path:
     # The retention criterion must fall at the true position **after** resolve(). The first paragraph of the above article is judged literally,
     # In the sandbox, `ln -s .sandbox link` can bypass: the first paragraph of "link/last_used_at"
     # It is a link. After parsing, it falls into .sandbox and is still in the workspace. ⇒ Release.
-    # The harm goes beyond "the sandbox can write its own volumes": this criterion also guards the Control Plane control plane.
-    # write_file tool, and restore's staging/retired temporary directory - write once
+    # The harm goes beyond "the sandbox can write its own volume": this check also guards the Control Plane's
+    # write_file tool and restore's staging/retired temporary directories - one write to
     # .sandbox/restore-* can tamper with the snapshot being restored.
     # Both checks are retained because they prevent the same thing: the literal one blocks "direct roll call"
     # .sandbox" (even if it itself is replaced by a symbolic link pointing elsewhere), this block "wrap around the name

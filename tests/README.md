@@ -61,7 +61,7 @@ indistinguishable from a real result:
 | The restore did not reproduce the original bytes | Every later reading in the session runs on a damaged tree. Only this row's **removal** is guarded: the branch fires when a filesystem write does not round-trip, which cannot be provoked in-process without a seam existing purely to provoke it |
 | A third party wrote the file mid-experiment | Restoring blind-writes over their work, silently, and the tree still looks fine |
 
-🔴 The last two are why the restore is verified by hashing the file rather than
+Note: the last two are why the restore is verified by hashing the file rather than
 by searching for the mutated text and putting the original back. A reverse
 search can match the wrong occurrence, or none at all, and report success either
 way; a hash comparison answers the question actually being asked, which is

@@ -20,7 +20,7 @@ Counters are pre-registered at zero for every known label combination
 rather than an absent series - otherwise it would be indistinguishable from
 "this build does not emit that metric".
 
-🔴 **No series carries a tenant, workspace or sandbox identifier.** That is what
+Constraint: **no series carries a tenant, workspace or sandbox identifier.** That is what
 makes an unauthenticated `/metrics` acceptable, and it is enforced by
 `tests/test_observability_artifacts.py` for the alert rules. Per-tenant numbers
 come from the authenticated `/v1/admin` routes. Adding a tenant label means
@@ -106,13 +106,13 @@ allowlist** of the paths a solo panel needs - the panel document, Grafana's own
 bundle, its frontend settings, the dashboard model, plugin settings, and
 `POST /api/ds/query`. Everything else is 403.
 
-🔴 The allowlist is a code constant on purpose. Proxying `/grafana/*` wholesale
+Constraint: the allowlist is a code constant on purpose. Proxying `/grafana/*` wholesale
 while attaching the service-account token would republish the entire Grafana API
 - including `/api/datasources/proxy/...`, which is "run any query against any
 datasource" - to every administrator of this console. A configurable allowlist is
 the same hole with a delay on it.
 
-🔴 `POST /api/ds/query` is checked in the **body**, not just by URL. It is
+Constraint: `POST /api/ds/query` is checked in the **body**, not just by URL. It is
 Grafana's generic query endpoint and dispatches on a datasource uid inside the
 request, so it is only read-only for the datasource it names: a Grafana with a
 SQL datasource attached would otherwise turn that one endpoint into arbitrary

@@ -53,7 +53,7 @@ header: they express the caller's sampling decision, and a hop that overwrote
 them would be reversing a decision someone else made, invisibly. Control Plane chooses
 flags (`01`) only for a trace it starts itself, where no decision exists yet.
 
-🔴 A malformed `traceparent` never fails a request. It is treated as absent and
+Constraint: a malformed `traceparent` never fails a request. It is treated as absent and
 the next source applies. Tracing is a diagnostic aid; a request that failed
 because its trace header was wrong would make the diagnostic layer an outage
 source.

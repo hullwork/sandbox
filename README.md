@@ -259,8 +259,9 @@ expected instead of first suspecting their own query.
 ## Deployment profiles
 
 Kustomize overlays under [`overlays/`](overlays/) layer on the provider-neutral base in
-[`k8s/`](k8s/). All of them render with `kubectl kustomize <path>`; CI checks that on
-every push.
+[`k8s/`](k8s/). Every overlay renders with `kubectl kustomize <path>` except
+`overlays/local-dev`, which is a Kustomize Component consumed by `overlays/local`
+rather than a deployable overlay; CI checks the others on every push.
 
 | Profile | Intended for | Maturity |
 | --- | --- | --- |

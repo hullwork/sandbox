@@ -86,7 +86,7 @@ Three rules decide what happens at startup:
 Switching it off removes the credential from the process, so the API refuses it
 too. Hiding the field in the Console is not the control; do not treat it as one.
 
-🔴 **`SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED=false` does not close every non-OIDC way in.**
+Constraint: **`SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED=false` does not close every non-OIDC way in.**
 It governs the static `SANDBOX_CONTROL_PLANE_TOKEN` and nothing else. API keys issued by this
 control plane keep authenticating exactly as before, and they are meant to:
 they are how any external service calls this platform, and they are revocable,
