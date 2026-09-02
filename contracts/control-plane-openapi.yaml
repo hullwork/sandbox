@@ -858,18 +858,25 @@ components:
             max_workspaces: {type: integer, minimum: 0}
             used_workspaces: {type: integer, minimum: 0}
     # owner: management plane only, for the same reason as OwnerQuery.
+    # The principal a workspace is resolved for; free text the tenant picks,
+    # used only as derivation material. Top-level principal_id/principal_type
+    # are refused with 400, not read.
+    Principal:
+      type: object
+      properties: {kind: {type: string, minLength: 1, maxLength: 128}, id: {type: string, minLength: 1, maxLength: 128}}
     CreateWorkspaceRequest:
       type: object
       required: [session_id]
-      properties: {session_id: {type: string, minLength: 1}, owner: {type: string}, principal_id: {type: string}, principal_type: {type: string}}
+      properties:
+        session_id: {type: string, minLength: 1, maxLength: 256}
+        owner: {type: string}
+        principal: {$ref: '#/components/schemas/Principal'}
     ResolveWorkspaceRequest:
       type: object
       required: [session_id]
       properties:
         session_id: {type: string, minLength: 1, maxLength: 256}
-        principal:
-          type: object
-          properties: {kind: {type: string, minLength: 1, maxLength: 128}, id: {type: string, minLength: 1, maxLength: 128}}
+        principal: {$ref: '#/components/schemas/Principal'}
     WorkspaceResolution:
       type: object
       required: [workspace_id, sandbox_id, template]
