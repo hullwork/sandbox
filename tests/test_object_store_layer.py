@@ -355,6 +355,60 @@ print(json.dumps({
         self.assertEqual(out["stamps"][0], "2026-09-01T00:00:00+00:00")
         self.assertEqual(out["prefix"], ["prefix/"])
 
+    def test_a_paged_walk_never_trips_the_listing_ceiling(self) -> None:
+        out = run('''
+import json
+core.MAX_LIST_ENTRIES = 10
+
+class Paged(Fake):
+    def __init__(self, pages):
+        super().__init__()
+        self.paged = pages
+    def list_objects_v2(self, **kwargs):
+        self.calls.append(("list_objects_v2", kwargs))
+        index = int(kwargs.get("ContinuationToken") or 0)
+        page = dict(self.paged[index])
+        if index + 1 < len(self.paged):
+            page["IsTruncated"] = True
+            page["NextContinuationToken"] = str(index + 1)
+        return page
+
+pages = [
+    {"Contents": [{"Key": "p/k%d-%d" % (n, i), "Size": 1, "LastModified": when(1)} for i in range(6)]}
+    for n in range(5)
+]
+store = Paged(pages)
+core.object_store = lambda: store
+seen = []
+token = None
+rounds = 0
+try:
+    while True:
+        items, token = core.object_list_page("b", "p/", continuation_token=token, page_size=6)
+        seen.extend(item["key"] for item in items)
+        rounds += 1
+        if not token:
+            break
+    verdict = "walked"
+except ValueError:
+    verdict = "refused"
+print(json.dumps({
+    "verdict": verdict,
+    "rounds": rounds,
+    "keys": len(seen),
+    "distinct": len(set(seen)),
+    "tokens": [c[1].get("ContinuationToken") for c in store.calls if c[0] == "list_objects_v2"],
+    "max_keys": sorted({c[1]["MaxKeys"] for c in store.calls if c[0] == "list_objects_v2"}),
+}))
+''')
+        # 30 objects against a ceiling of 10: object_list would refuse between
+        # pages, and the checkpoint GC that used it stopped for good once the
+        # bucket outgrew the ceiling. The paged walk sees every key exactly once.
+        self.assertEqual(out["verdict"], "walked")
+        self.assertEqual((out["rounds"], out["keys"], out["distinct"]), (5, 30, 30))
+        self.assertEqual(out["tokens"], [None, "1", "2", "3", "4"])
+        self.assertEqual(out["max_keys"], [6])
+
 
 if __name__ == "__main__":
     unittest.main()

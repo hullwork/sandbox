@@ -495,6 +495,71 @@ class WorkspaceSweepTests(ReaperCase):
         self.assertEqual(result["workspaces"], 0)
 
 
+class CheckpointSweepTests(ReaperCase):
+    """The checkpoint GC walks the bucket page by page and deletes as it goes.
+
+    It used to call object_list on the whole bucket, which refuses past
+    MAX_LIST_ENTRIES (10000). Once the bucket held more checkpoint objects than
+    that, every round raised before the first delete, and nothing else ever
+    removed them: the sweep stopped for good. Here the fake bucket holds more
+    than the ceiling, and the sweep must still delete every expired archive.
+    """
+
+    CEILING = 10_000
+    RETENTION = 3_600
+
+    def sweep_checkpoints(self, objects: list[dict], *, page_size: int = 1000) -> tuple[int, list[str], int]:
+        kube = FakeKube([])
+        control_plane = build_control_plane(kube, FakeStore())
+        control_plane.OBJECT_STORE_WORKSPACE_BUCKET = "workspaces"
+        control_plane.CHECKPOINT_RETENTION_SECONDS = self.RETENTION
+        control_plane.MAX_LIST_ENTRIES = self.CEILING
+        deleted: list[str] = []
+        pages_served = 0
+
+        def object_list(bucket, prefix):
+            raise AssertionError("the sweep must not list the whole bucket at once")
+
+        def object_list_page(bucket, prefix, *, continuation_token=None, page_size=page_size):
+            nonlocal pages_served
+            pages_served += 1
+            start = int(continuation_token or 0)
+            page = objects[start:start + page_size]
+            next_token = str(start + page_size) if start + page_size < len(objects) else None
+            return page, next_token
+
+        control_plane.object_list = object_list
+        control_plane.object_list_page = object_list_page
+        control_plane.object_delete_versions = lambda bucket, key: deleted.append(key)
+        reaper = load_reaper(control_plane)
+        removed = reaper.reap_expired_checkpoints(now=NOW)
+        return removed, deleted, pages_served
+
+    @staticmethod
+    def archive(index: int, *, age: int) -> dict:
+        from datetime import datetime, timezone
+        modified = datetime.fromtimestamp(NOW - age, tz=timezone.utc).isoformat()
+        return {
+            "key": f"workspaces/ws-{index:012x}/checkpoints/cp-{index}.tar.gz",
+            "bytes": 1,
+            "last_modified": modified,
+        }
+
+    def test_a_bucket_past_the_listing_ceiling_is_still_swept(self) -> None:
+        expired = [self.archive(i, age=self.RETENTION + 1) for i in range(self.CEILING + 500)]
+        fresh = [self.archive(10 ** 6 + i, age=10) for i in range(3)]
+        other = [{"key": "workspaces/ws-000000000000/data/not-a-checkpoint.tar.gz",
+                  "bytes": 1, "last_modified": "2020-01-01T00:00:00+00:00"}]
+        removed, deleted, pages = self.sweep_checkpoints(expired + fresh + other)
+        self.assertEqual(removed, len(expired))
+        self.assertEqual(sorted(deleted), sorted(item["key"] for item in expired))
+        self.assertGreater(pages, 1, "the walk must be paged, not one listing")
+
+    def test_an_empty_bucket_is_one_page_and_no_deletes(self) -> None:
+        removed, deleted, pages = self.sweep_checkpoints([])
+        self.assertEqual((removed, deleted, pages), (0, [], 1))
+
+
 def load_admission_helpers(kube: FakeKube, *, ttl: int, idle_evict: int, now: float) -> dict:
     """Extract idle-victim selection and provider-neutral Runtime admission.
 

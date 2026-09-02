@@ -1790,6 +1790,53 @@ def object_list(bucket: str, prefix: str) -> list[dict[str, Any]]:
     return object_call("list", listing)
 
 
+def object_list_page(
+    bucket: str,
+    prefix: str,
+    *,
+    continuation_token: str | None = None,
+    page_size: int = 1000,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """One page of a listing, and the token for the next one (None on the last page).
+
+    Responsibility: the bounded form of object_list for callers that walk a prefix of unknown
+         size and act on each page as it arrives - the checkpoint GC sweeps the whole bucket.
+    🔴 Why not object_list: it accumulates and refuses past MAX_LIST_ENTRIES. That is right for a
+       response body, and wrong for a sweep whose job is to make the count go down: once the bucket
+       held more checkpoint objects than the ceiling, every GC round raised before deleting anything,
+       and nothing else ever removed them - the sweep stopped for good and the bucket only grew.
+       A page holds the gate for one round trip and at most page_size rows; memory is bounded by the
+       page, not by the bucket.
+    Constraint: page_size is capped by MAX_LIST_ENTRIES so the per-call ceiling stays the same."""
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+    page_size = min(page_size, MAX_LIST_ENTRIES)
+
+    def listing() -> tuple[list[dict[str, Any]], str | None]:
+        kwargs: dict[str, Any] = {
+            "Bucket": bucket,
+            "Prefix": prefix,
+            "MaxKeys": page_size,
+        }
+        if continuation_token:
+            kwargs["ContinuationToken"] = continuation_token
+        page = object_store().list_objects_v2(**kwargs)
+        items = [
+            {
+                "key": item["Key"],
+                "bytes": int(item.get("Size") or 0),
+                "last_modified": _timestamp(item.get("LastModified")),
+            }
+            for item in page.get("Contents") or []
+        ]
+        next_token = (
+            page.get("NextContinuationToken") if page.get("IsTruncated") else None
+        )
+        return items, (str(next_token) if next_token else None)
+
+    return object_call("list", listing)
+
+
 def object_versions(bucket: str, key: str) -> list[dict[str, Any]]:
     """Every version and delete marker of one key, newest first.
 
@@ -3663,8 +3710,10 @@ SHUTDOWN_INFLIGHT_SECONDS = float(
 # Wait for the reaper to finish its current round. Also an upper limit: most of the time it is sitting in
 # _SHUTTING_DOWN.wait(15), and returns as soon as the event is set.
 #
-# 🔴 Deliberately does **not** cover the worst case: one round's checkpoint GC calls mc, whose timeout is 180s.
-# Holding the Pod another three minutes for that is not worth it - checkpoint / ticket GC is fully idempotent and continues next
+# 🔴 Deliberately does **not** cover the worst case: one round's checkpoint GC walks the whole bucket one
+# page at a time (object_list_page), each page a gated call with `read_timeout=60` per socket read, so a
+# round has no overall ceiling - a slow store and a large bucket can take many minutes. Holding the Pod for
+# that is not worth it - checkpoint / ticket GC is fully idempotent and continues next
 # time; a delete_runtime cut off halfway (Pod deleted but quota not yet returned) is covered by the two-way reconciliation.
 # This value governs a regular round: activity probes of 2s×N plus a few K8s round trips.
 SHUTDOWN_REAPER_SECONDS = float(

@@ -23,37 +23,48 @@ __all__ = (
 
 
 def reap_expired_checkpoints(now: int | None = None) -> int:
+    """Delete every checkpoint archive older than CHECKPOINT_RETENTION_SECONDS, one page at a time.
+
+    🔴 Page, judge, delete, next page - never list the bucket first. object_list refuses past
+       MAX_LIST_ENTRIES, and a bucket that had grown past it made every round raise before the first
+       delete: the only thing that shrinks the bucket had stopped, permanently, with an error line an
+       hour apart as the sole symptom. Memory here is one page, whatever the bucket holds."""
     current = now or int(time.time())
     prefix = "workspaces/"
-    listed = control_plane.object_list(
-        control_plane.OBJECT_STORE_WORKSPACE_BUCKET, prefix
-    )
     removed = 0
-    for item in listed:
-        try:
-            listed_key = str(item.get("key") or "")
-            key = (
-                listed_key
-                if listed_key.startswith(prefix)
-                else f"{prefix}{listed_key}"
-            )
-            modified = str(item.get("last_modified") or "")
-            modified_at = int(
-                datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
-            )
-        except (ValueError, TypeError):
-            continue
-        if (
-            "/checkpoints/" not in key
-            or not key.endswith(".tar.gz")
-            or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
-        ):
-            continue
-        control_plane.object_delete_versions(
-            control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+    token: str | None = None
+    while True:
+        items, token = control_plane.object_list_page(
+            control_plane.OBJECT_STORE_WORKSPACE_BUCKET,
+            prefix,
+            continuation_token=token,
         )
-        removed += 1
-    return removed
+        for item in items:
+            try:
+                listed_key = str(item.get("key") or "")
+                key = (
+                    listed_key
+                    if listed_key.startswith(prefix)
+                    else f"{prefix}{listed_key}"
+                )
+                modified = str(item.get("last_modified") or "")
+                modified_at = int(
+                    datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
+                )
+            except (ValueError, TypeError):
+                continue
+            if (
+                "/checkpoints/" not in key
+                or not key.endswith(".tar.gz")
+                or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
+            ):
+                continue
+            control_plane.object_delete_versions(
+                control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
+            )
+            removed += 1
+        if not token:
+            return removed
 
 
 def reap_once(now: int | None = None) -> dict[str, int]:
