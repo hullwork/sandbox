@@ -117,17 +117,17 @@ def pod(
 ) -> dict:
     labels = {
         "app.kubernetes.io/name": "sandbox-runtime",
-        "convee.io/sandbox-id": sandbox_id,
+        "sandbox.hullwork.com/sandbox-id": sandbox_id,
     }
     if workspace_id:
-        labels["convee.io/workspace-id"] = workspace_id
+        labels["sandbox.hullwork.com/workspace-id"] = workspace_id
     if tenant:
-        labels["convee.io/tenant"] = tenant
+        labels["sandbox.hullwork.com/tenant"] = tenant
     annotations = {}
     if expires_at is not None:
-        annotations["convee.io/expires-at"] = str(expires_at)
+        annotations["sandbox.hullwork.com/expires-at"] = str(expires_at)
     if hard_expires_at is not None:
-        annotations["convee.io/hard-expires-at"] = str(hard_expires_at)
+        annotations["sandbox.hullwork.com/hard-expires-at"] = str(hard_expires_at)
     return {
         "metadata": {
             "name": f"sandbox-{sandbox_id}",
@@ -149,17 +149,17 @@ def runtime_from_pod(item: dict) -> RuntimeInstance:
             return None
         return value if value > 0 else None
 
-    runtime_id = labels.get("convee.io/sandbox-id", "")
+    runtime_id = labels.get("sandbox.hullwork.com/sandbox-id", "")
     return RuntimeInstance(
         runtime_id=runtime_id,
-        workspace_id=labels.get("convee.io/workspace-id", ""),
+        workspace_id=labels.get("sandbox.hullwork.com/workspace-id", ""),
         provider_id=metadata.get("name", runtime_id),
         state="running",
         ready=True,
         isolation="gvisor",
-        tenant_id=labels.get("convee.io/tenant"),
-        expires_at=positive_int("convee.io/expires-at"),
-        hard_expires_at=positive_int("convee.io/hard-expires-at"),
+        tenant_id=labels.get("sandbox.hullwork.com/tenant"),
+        expires_at=positive_int("sandbox.hullwork.com/expires-at"),
+        hard_expires_at=positive_int("sandbox.hullwork.com/hard-expires-at"),
     )
 
 
@@ -293,7 +293,7 @@ class TtlReapingTests(ReaperCase):
             pod("sb-zero", expires_at=0),
         ]
         pods.append(pod("sb-garbage", expires_at=NOW - 1))
-        pods[-1]["metadata"]["annotations"]["convee.io/expires-at"] = "soon"
+        pods[-1]["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = "soon"
         result, kube, control_plane = self.sweep(pods, store=None)
         self.assertEqual(result["runtimes"], 0)
         self.assertEqual(kube.deleted("pods"), [])
@@ -423,7 +423,7 @@ class ReuseRaceTests(ReaperCase):
                 snapshot = [json.loads(json.dumps(item)) for item in items]
                 # The API's touch lands after the listing was taken.
                 for item in self.pods:
-                    item["metadata"]["annotations"]["convee.io/expires-at"] = str(NOW + 1800)
+                    item["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = str(NOW + 1800)
                 return snapshot
 
         kube = TouchedAfterListing([pod("sb-reused", expires_at=NOW - 1, workspace_id="ws-live")])
@@ -457,7 +457,7 @@ class ReuseRaceTests(ReaperCase):
                 items = super().list(namespace, plural, label_selector)
                 snapshot = [json.loads(json.dumps(item)) for item in items]
                 for item in self.pods:
-                    item["metadata"]["annotations"]["convee.io/expires-at"] = str(NOW + 1800)
+                    item["metadata"]["annotations"]["sandbox.hullwork.com/expires-at"] = str(NOW + 1800)
                 return snapshot
 
         kube = TouchedAfterListing([pod("sb-old", expires_at=NOW - 1, hard_expires_at=NOW - 1)])

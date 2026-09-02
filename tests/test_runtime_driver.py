@@ -60,9 +60,9 @@ def settings() -> ManifestSettings:
         workspace_pvc="sandbox-workspaces",
         workspace_storage_mode="shared",
         runtime_class="gvisor",
-        runtime_node_selector={"sandbox.convee.io/node-role": "runtime"},
+        runtime_node_selector={"sandbox.hullwork.com/node-role": "runtime"},
         runtime_tolerations=({
-            "key": "sandbox.convee.io/node-role",
+            "key": "sandbox.hullwork.com/node-role",
             "operator": "Equal",
             "value": "runtime",
             "effect": "NoSchedule",
@@ -108,7 +108,7 @@ class RuntimeDriverTests(unittest.TestCase):
         manifest = self.kube.calls[-1][4]
         self.assertEqual(manifest["spec"]["runtimeClassName"], "gvisor")
         self.assertEqual(
-            manifest["metadata"]["labels"]["convee.io/workspace-id"],
+            manifest["metadata"]["labels"]["sandbox.hullwork.com/workspace-id"],
             "ws-aaaaaaaaaaaa",
         )
 
@@ -121,7 +121,7 @@ class RuntimeDriverTests(unittest.TestCase):
                 "sandbox-workloads",
                 "pods",
                 "app.kubernetes.io/name=sandbox-runtime,"
-                "convee.io/workspace-id=ws-aaaaaaaaaaaa",
+                "sandbox.hullwork.com/workspace-id=ws-aaaaaaaaaaaa",
             ),
         )
         self.assertEqual(
@@ -148,10 +148,10 @@ class RuntimeDriverTests(unittest.TestCase):
             "metadata": {
                 "name": "runtime-sb-0123456789ab",
                 "labels": {
-                    "convee.io/sandbox-id": "sb-0123456789ab",
-                    "convee.io/workspace-id": "ws-aaaaaaaaaaaa",
+                    "sandbox.hullwork.com/sandbox-id": "sb-0123456789ab",
+                    "sandbox.hullwork.com/workspace-id": "ws-aaaaaaaaaaaa",
                 },
-                "annotations": {"convee.io/expires-at": "1700001800"},
+                "annotations": {"sandbox.hullwork.com/expires-at": "1700001800"},
             },
             "spec": {
                 "runtimeClassName": "gvisor",

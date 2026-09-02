@@ -148,7 +148,7 @@ before `kubectl apply`.
 | `sandbox-postgres` | Service (or ExternalName) | `sandbox-system` | Resolves to PostgreSQL on port 5432 |
 | `object-store-config` | ConfigMap | `sandbox-system` | Patch `endpoint`, the three bucket names, and `health-path` for your provider; the managed Ceph endpoint is `http://rook-ceph-rgw-object-store.rook-ceph.svc.cluster.local:80` |
 | `sandbox-rwx` | StorageClass | cluster | ReadWriteMany capable; `overlays/eks` substitutes the EFS class |
-| `gvisor` | RuntimeClass handler | cluster | `runsc` installed on every node labeled `sandbox.convee.io/node-role=runtime` |
+| `gvisor` | RuntimeClass handler | cluster | `runsc` installed on every node labeled `sandbox.hullwork.com/node-role=runtime` |
 
 The Helm chart names the database Secret with `postgresql.authSecret` (default
 `sandbox-postgres-auth`). That single value is used by the embedded PostgreSQL

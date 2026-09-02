@@ -296,7 +296,7 @@ def reap_expired_ticket_leases(now: int | None = None) -> int:
         metadata = lease.get("metadata", {})
         annotations = metadata.get("annotations", {})
         try:
-            expires_at = int(annotations.get("convee.io/expires-at", "0"))
+            expires_at = int(annotations.get("sandbox.hullwork.com/expires-at", "0"))
         except (TypeError, ValueError):
             continue
         name = metadata.get("name")

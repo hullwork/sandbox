@@ -144,7 +144,7 @@ class HelmPackageContractTests(unittest.TestCase):
                 "helm", "template", "sandbox", str(CHART),
                 "--set-string", "scheduling.system.nodeSelector.example\\.com/node-role=system",
                 "--set-string", "runtime.nodeSelector.sandbox\\.convee\\.io/node-role=runtime",
-                "--set-string", "runtime.tolerations[0].key=sandbox.convee.io/node-role",
+                "--set-string", "runtime.tolerations[0].key=sandbox.hullwork.com/node-role",
                 "--set-string", "runtime.tolerations[0].operator=Equal",
                 "--set-string", "runtime.tolerations[0].value=runtime",
                 "--set-string", "runtime.tolerations[0].effect=NoSchedule",
@@ -178,7 +178,7 @@ class HelmPackageContractTests(unittest.TestCase):
         }
         self.assertEqual(
             env["SANDBOX_RUNTIME_NODE_SELECTOR"],
-            "sandbox.convee.io/node-role=runtime",
+            "sandbox.hullwork.com/node-role=runtime",
         )
         self.assertEqual(
             json.loads(env["SANDBOX_RUNTIME_TOLERATIONS"])[0]["effect"],

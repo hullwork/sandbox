@@ -21,8 +21,8 @@ When an elastic pool is enabled, system services and Runtime workloads have
 separate scheduling contracts. Stable nodes host the Control Plane, Volume
 service, database, object storage, ingress, and observability components. Elastic
 workers host only disposable Runtime Pods and use the label
-`sandbox.convee.io/node-role=runtime` plus the taint
-`sandbox.convee.io/node-role=runtime:NoSchedule`.
+`sandbox.hullwork.com/node-role=runtime` plus the taint
+`sandbox.hullwork.com/node-role=runtime:NoSchedule`.
 
 The Helm values `scheduling.system.*` and `runtime.*` are the public integration
 surface. An infrastructure project may populate those ordinary values, but the

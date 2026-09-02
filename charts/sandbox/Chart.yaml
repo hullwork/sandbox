@@ -9,4 +9,4 @@ sources:
   - https://github.com/hullwork/sandbox
 annotations:
   artifacthub.io/license: MIT
-  sandbox.convee.io/package-capabilities: sandbox-control-plane,sandbox-runtime
+  sandbox.hullwork.com/package-capabilities: sandbox-control-plane,sandbox-runtime

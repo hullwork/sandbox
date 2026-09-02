@@ -137,7 +137,7 @@ ensure_cluster() {
   kubectl --context "$SANDBOX_KUBE_CONTEXT" taint nodes --all \
     node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
   kubectl --context "$SANDBOX_KUBE_CONTEXT" label nodes --all \
-    sandbox.convee.io/node-role=runtime --overwrite >/dev/null
+    sandbox.hullwork.com/node-role=runtime --overwrite >/dev/null
   bash "$SCRIPT_DIR/install-gvisor-kubeadm.sh" "$VM_NAME"
   kubectl --context "$SANDBOX_KUBE_CONTEXT" wait node --all \
     --for=condition=Ready --timeout=5m

@@ -259,7 +259,7 @@ if SANDBOX_RUNTIME_DRIVER != "gvisor":
 # harder to troubleshoot than the apiserver refusing creation outright when the object does not exist.
 SANDBOX_RUNTIME_CLASS = os.getenv("SANDBOX_RUNTIME_CLASS", "gvisor").strip()
 # Configuration item: nodeSelector for the Runtime Pod (comma-separated k=v, e.g.
-# "sandbox.convee.io/node-role=runtime"). Empty = no constraint; single-node cluster behavior is unchanged.
+# "sandbox.hullwork.com/node-role=runtime"). Empty = no constraint; single-node cluster behavior is unchanged.
 # Same "key omitted when not configured" semantics as SANDBOX_RUNTIME_CLASS: the read-back view and
 # the e2e assertion rely on the key's presence to tell "not set" from "set to empty".
 SANDBOX_RUNTIME_NODE_SELECTOR = {
@@ -1104,7 +1104,7 @@ def object_slot() -> Any:
         if queued_here:
             _OBJECT_QUEUE_SLOTS.release()
 _RUNTIME_ADMISSION_LOCK = threading.Lock()
-TICKET_LEASE_SELECTOR = "convee.io/purpose=object-ticket"
+TICKET_LEASE_SELECTOR = "sandbox.hullwork.com/purpose=object-ticket"
 
 
 #/healthz is unauthenticated (see ROUTE_AUTH), so anything that reaches its body
@@ -1477,11 +1477,11 @@ def consume_object_ticket(claims: dict) -> bool:
             "name": lease_name,
             "namespace": SYSTEM_NAMESPACE,
             "labels": {
-                "convee.io/purpose": "object-ticket",
+                "sandbox.hullwork.com/purpose": "object-ticket",
                 "app.kubernetes.io/managed-by": "sandbox-control-plane",
             },
             "annotations": {
-                "convee.io/expires-at": str(int(claims["exp"])),
+                "sandbox.hullwork.com/expires-at": str(int(claims["exp"])),
             },
         },
         "spec": {
@@ -3104,7 +3104,7 @@ def ensure_workspace(workspace_id: str) -> dict:
                     "namespace": WORKLOAD_NAMESPACE,
                     "labels": {
                         "app.kubernetes.io/managed-by": "sandbox-controller",
-                        "convee.io/workspace-id": workspace_id,
+                        "sandbox.hullwork.com/workspace-id": workspace_id,
                     },
                 },
                 "spec": {

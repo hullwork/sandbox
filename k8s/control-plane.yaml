@@ -91,13 +91,13 @@ spec:
  # Will get stuck on RunContainerError after successful scheduling. Leave empty to abandon gVisor kernel isolation.
             - name: SANDBOX_RUNTIME_CLASS
               value: gvisor
- # Runtime Pod (untrusted code) is nailed to sandbox.convee.io/node-role=runtime
+ # Runtime Pod (untrusted code) is nailed to sandbox.hullwork.com/node-role=runtime
  # Labeled worker node, separated from the control-plane/Control Plane. The label of the local stack is placed in
  # on the designated runtime node; if unset, portable single-node behavior is preserved.
             - name: SANDBOX_RUNTIME_NODE_SELECTOR
-              value: sandbox.convee.io/node-role=runtime
+              value: sandbox.hullwork.com/node-role=runtime
             - name: SANDBOX_RUNTIME_TOLERATIONS
-              value: '[{"key":"sandbox.convee.io/node-role","operator":"Equal","value":"runtime","effect":"NoSchedule"}]'
+              value: '[{"key":"sandbox.hullwork.com/node-role","operator":"Equal","value":"runtime","effect":"NoSchedule"}]'
  # Prefix whitelist of template images, separated by commas. **Not configured = Template management is closed as a whole**
  # (POST/DELETE /v1/admin/templates returns 409, /v1/whoami’s
  # templates:write) does not appear in capabilities, this is a deliberate fail closed:
