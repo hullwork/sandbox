@@ -83,6 +83,9 @@ PROBE_BODY = """
         "ws_expired": mint({**scoped, "kind": "workspace", "sub": ws, "exp": now - 10}),
         "ws_other_subject": mint({**scoped, "kind": "workspace", "sub": "ws-ffffffffffff"}),
         "ws_sandbox_kind": mint({**scoped, "kind": "sandbox", "sub": sb}),
+        # Same subject string, wrong kind: the only case that isolates the
+        # kind comparison from the subject comparison.
+        "ws_wrong_kind_same_subject": mint({**scoped, "kind": "sandbox", "sub": ws}),
     }
     for label, bad in claim_tokens.items():
         call(f"files_{label}", "GET", f"/v1/workspaces/{ws}/files/list?path=.", bad)
@@ -93,6 +96,7 @@ PROBE_BODY = """
     call("mcp_other_subject", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "sandbox", "sub": "sb-ffffffffffff"}), mcp_body)
     call("mcp_workspace_kind", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "workspace", "sub": ws}), mcp_body)
     call("mcp_no_exp", "POST", f"/v1/sandboxes/{sb}/mcp", mint({"aud": "sandbox-control-plane", "kind": "sandbox", "sub": sb}), mcp_body)
+    call("mcp_wrong_kind_same_subject", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "workspace", "sub": sb}), mcp_body)
 
     call("files_valid", "GET", f"/v1/workspaces/{ws}/files/list?path=.", token)
     call("write_valid", "POST", f"/v1/workspaces/{ws}/files/write", token, {"path": "a.txt", "content": "x"})
@@ -167,11 +171,11 @@ class CredentialBoundaryTests(unittest.TestCase):
                     self.assert_refused_before_downstream(f"{route}_{label}", 401)
 
     def test_a_scoped_token_for_another_subject_or_kind_is_a_401(self) -> None:
-        for label in ("ws_other_subject", "ws_sandbox_kind"):
+        for label in ("ws_other_subject", "ws_sandbox_kind", "ws_wrong_kind_same_subject"):
             for route in ("files", "write"):
                 with self.subTest(token=label, route=route):
                     self.assert_refused_before_downstream(f"{route}_{label}", 401)
-        for name in ("mcp_other_subject", "mcp_workspace_kind"):
+        for name in ("mcp_other_subject", "mcp_workspace_kind", "mcp_wrong_kind_same_subject"):
             with self.subTest(route=name):
                 self.assert_refused_before_downstream(name, 401)
         # Control: a sandbox token with the right subject passes the gate and
