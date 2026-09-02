@@ -8,7 +8,9 @@ merely unusual client would:
   or a boolean is a 400, not a dropped connection (``int(None)`` raised a
   TypeError the dispatcher did not translate, and the thread died);
 * the Grafana panel proxy answers 400 to a ``Content-Length`` it cannot
-  parse or that is negative, instead of dying or waiting for EOF.
+  parse or that is negative, instead of dying or waiting for EOF;
+* the access log records the request path and never the query string, so
+  the OIDC callback's ``code`` and ``state`` stay out of the process log.
 """
 
 from __future__ import annotations
@@ -110,6 +112,37 @@ class GrafanaContentLengthTests(unittest.TestCase):
     def test_the_size_bound_and_the_server_are_intact(self) -> None:
         self.assertEqual(self.results["huge"]["status"], 413, self.results["huge"])
         self.assertEqual(self.results["after"]["status"], 200)
+
+
+class AccessLogQueryTests(unittest.TestCase):
+    SECRET = "SUPERSECRETCODE-4f1e"
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.results, cls.stdout = run_probe(
+            f"""
+            call("whoami", "GET", "/v1/whoami?code={cls.SECRET}&state=abc", admin)
+            call("callback", "GET", "/v1/auth/oidc/callback?code={cls.SECRET}&state=abc")
+            call("files", "GET", "/v1/workspaces?filter={cls.SECRET}", admin)
+            """
+        )
+
+    def test_the_requests_were_served_and_logged(self) -> None:
+        self.assertEqual(self.results["whoami"]["status"], 200)
+        self.assertIsNotNone(self.results["callback"]["status"])
+        lines = [line for line in self.stdout.splitlines() if "/v1/whoami" in line]
+        self.assertTrue(lines, self.stdout)
+        self.assertTrue(
+            any('"GET /v1/whoami HTTP/1.1" 200' in line for line in lines), lines
+        )
+        self.assertTrue(
+            any('/v1/auth/oidc/callback ' in line for line in self.stdout.splitlines()), self.stdout
+        )
+
+    def test_the_query_string_never_reaches_the_log(self) -> None:
+        log_lines = [line for line in self.stdout.splitlines() if not line.startswith("RESULTS ")]
+        self.assertEqual([line for line in log_lines if self.SECRET in line], [])
+        self.assertEqual([line for line in log_lines if "?" in line], [])
 
 
 if __name__ == "__main__":

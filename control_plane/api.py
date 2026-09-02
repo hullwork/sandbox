@@ -160,6 +160,27 @@ class ApiHandler(BaseHTTPRequestHandler):
         # devtools pane shows the same id the server logged.
         self.send_header(tracing.REQUEST_ID_HEADER, self.current_trace_id())
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        """Access log line without the query string.
+
+        🔴 The stdlib logs ``requestline`` verbatim, and the OIDC callback
+        arrives as ``GET /v1/auth/oidc/callback?code=...&state=...``: the
+        authorization code went into the process log on every sign-in. Only
+        the path is recorded; nothing in a query string is needed to read
+        the log, and credentials in it are the one thing that must not be.
+        """
+        if isinstance(code, HTTPStatus):
+            code = code.value
+        path = urlparse(getattr(self, "path", "") or "").path
+        self.log_message(
+            '"%s %s %s" %s %s',
+            getattr(self, "command", "?") or "?",
+            path,
+            getattr(self, "request_version", ""),
+            str(code),
+            str(size),
+        )
+
     def log_message(self, fmt: str, *args: object) -> None:
         print(
             f"{self.address_string()} - {fmt % args} "
