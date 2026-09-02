@@ -5,7 +5,10 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: quay.io/ceph/ceph:v20.2.4
+    # v20.2.4, pinned to the multi-architecture index digest (amd64 and
+    # arm64) so the tag cannot be re-pointed underneath the local profile.
+    # rook/loop-device.yaml carries the same digest; move both together.
+    image: quay.io/ceph/ceph:v20.2.4@sha256:6bb1c8a42fbc0bf87938946990b65174466997bc11c31eb5a323225a779fd8f9
     allowUnsupported: false
   dataDirHostPath: /var/lib/rook
   mon:

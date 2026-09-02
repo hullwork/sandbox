@@ -5,6 +5,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Weekly cache-free rebuild of every image. Alpine keeps only the newest
+    # revision of a package per branch, so an exact apk pin stops resolving
+    # with no change in this repository; the pull-request build would hide
+    # that behind the GHA layer cache until someone touched the Dockerfile.
+    - cron: '17 3 * * 1'
 
 permissions:
   contents: read
@@ -107,9 +113,30 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
           push: false
+          # Loaded into the runner's docker so the scan below sees the image;
+          # with the buildx container driver an unloaded build exists only in
+          # the build cache.
+          load: true
           tags: sandbox-${{ matrix.name }}:ci
-          cache-from: type=gha
+          # The scheduled run must reach apk and pip for real, so it neither
+          # reads the layer cache nor is offered one. Written as
+          # `cond && value || ''` deliberately: the reverse form
+          # `cond && '' || value` always yields value, because '' is falsy.
+          no-cache: ${{ github.event_name == 'schedule' }}
+          cache-from: ${{ github.event_name != 'schedule' && 'type=gha' || '' }}
           cache-to: type=gha,mode=max
+      - name: Scan built image with the release gate's parameters
+        # Same scanners, severities, and exit code as release.yml's staged
+        # image scan. Without this the vulnerabilities job below only reads
+        # uv.lock and package-lock.json, so an OS package CVE in the base
+        # image stayed green on main and failed on tag day.
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          image-ref: sandbox-${{ matrix.name }}:ci
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
 
   secrets:
     runs-on: ubuntu-latest

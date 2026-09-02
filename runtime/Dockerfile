@@ -1,7 +1,7 @@
 # The build context is the repository root, not runtime/, because
 # sandbox_platform/safe_stdout.py and the inlined File Service live elsewhere in
 # the repository.
-FROM python:3.14-alpine@sha256:05b2b8b732ecd268fee8727a369f936f022d1321b59befd13c30ede22769dcdc
+FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
 
 # The Agent session running in the sandbox must be able to verify the code and detect dependencies on the spot:
 # - nodejs/npm: "Developing Angry Birds" two sessions (2026-08-20) writing JS front-end in the sandbox,
@@ -14,7 +14,7 @@ FROM python:3.14-alpine@sha256:05b2b8b732ecd268fee8727a369f936f022d1321b59befd13
 # To upgrade digest and apk pin, you need to manually change this.
 RUN apk add --no-cache bash=5.3.9-r1 tini=0.19.0-r3 \
         nodejs=24.18.1-r0 npm=11.12.1-r0 \
-        curl=8.21.0-r0 git=2.54.0-r0 jq=1.8.2-r0 unzip=6.0-r16 make=4.4.1-r4 \
+        curl=8.22.0-r0 git=2.54.0-r0 jq=1.8.2-r0 unzip=6.0-r16 make=4.4.1-r4 \
     && addgroup -g 65532 sandbox \
     && adduser -D -u 65532 -G sandbox -h /workspace sandbox \
     && mkdir -p /workspace /tmp \

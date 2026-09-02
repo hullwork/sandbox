@@ -2,6 +2,14 @@
 set -euo pipefail
 
 required=(docker limactl kubectl helm python3 openssl)
+# Lima on Linux has a single vmType, qemu, and boots the VM with the host
+# architecture's system emulator, which limactl does not ship: without it
+# `limactl start` fails after every check above has passed. macOS uses the
+# Virtualization framework instead. shasum is what install-cilium-kubeadm.sh
+# verifies the Cilium chart with, and local-cluster.sh the Rook chart.
+if [ "$(uname -s)" = Linux ]; then
+  required+=("qemu-system-$(uname -m)" shasum)
+fi
 missing=()
 
 for command_name in "${required[@]}"; do

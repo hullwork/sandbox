@@ -2,11 +2,11 @@
 # S3-compatible object store. Every host, endpoint, and bucket below is a
 # placeholder; replace them before applying.
 #
-# Status: experimental. The default sandbox-control-plane image does not ship the
-# pymysql driver (control_plane/requirements.lock does not include it), so
-# SANDBOX_STORE_BACKEND=mysql fails at startup with "MySQL driver is
-# unavailable" until you build an image that adds it. PostgreSQL remains the
-# supported production backend (see k8s/control-plane.yaml).
+# Status: experimental. The default sandbox-control-plane image ships the
+# checksum-locked PyMySQL driver (control_plane/requirements.lock), so
+# SANDBOX_STORE_BACKEND=mysql starts; what it lacks is the backend-specific
+# contract tests and a compatibility review (docs/DEPLOYMENT.md). PostgreSQL
+# remains the supported production backend (see k8s/control-plane.yaml).
 #
 # Pre-create both Secrets in sandbox-system before applying this overlay:
 #

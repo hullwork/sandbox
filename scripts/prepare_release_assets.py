@@ -12,10 +12,14 @@ from typing import Any
 import yaml
 
 
+# Keys are the release workflow's ``images`` matrix names: they name the
+# ``image-<name>.json`` / ``image-<name>.cdx.json`` evidence files this script
+# reads. tests/test_release_assets.py generates those files by running the
+# workflow's own step, so a drift between the two fails there, not on tag day.
 COMPONENT_IMAGES = {
     "runtime": "sandbox-runtime:0.5.0",
     "file-service": "sandbox-file-service:0.3.0",
-    "control_plane": "sandbox-control-plane:0.7.0",
+    "control-plane": "sandbox-control-plane:0.7.0",
     "console": "sandbox-console:0.1.0",
 }
 IMAGE_NAME = re.compile(r"^ghcr\.io/[a-z0-9][a-z0-9._/-]*$")
@@ -29,7 +33,10 @@ def load_image_identities(release_dir: pathlib.Path) -> dict[str, str]:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("component") != component:
             raise ValueError(f"component mismatch in {path}")
-        image = str(data.get("image", ""))
+        # ``repository`` is the key the workflow's "Record deployable image
+        # identity" step writes; ``image`` was read here while the workflow
+        # never wrote it, so every release failed on its last job.
+        image = str(data.get("repository", ""))
         digest = str(data.get("digest", ""))
         if not IMAGE_NAME.fullmatch(image) or not DIGEST.fullmatch(digest):
             raise ValueError(f"invalid image identity in {path}")

@@ -279,7 +279,7 @@ jobs:
       - name: Lint, render, and package chart
         run: |
           helm lint charts/sandbox
-          helm template sandbox charts/sandbox >sandbox-rendered.yaml
+          helm template sandbox charts/sandbox >chart-dist/sandbox-rendered.yaml
           helm package charts/sandbox --destination chart-dist
           cp charts/sandbox/package.yaml chart-dist/sandbox-package.yaml
       - name: Authenticate to GitHub Container Registry
@@ -309,9 +309,14 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: helm-chart
+          # All three live in one directory on purpose. upload-artifact keeps
+          # paths relative to the common ancestor of what it is given; with
+          # the rendered manifest at the workspace root that ancestor was the
+          # root and github-release downloaded a chart-dist/ subdirectory,
+          # which `gh release create` refuses as an asset.
           path: |
             chart-dist/*.tgz
-            sandbox-rendered.yaml
+            chart-dist/sandbox-rendered.yaml
             chart-dist/package-metadata.json
           if-no-files-found: error
 
@@ -341,12 +346,20 @@ jobs:
             --manifest-output "release/sandbox-${GITHUB_REF_NAME}.yaml"
           rm release/base-manifest.yaml
           checksum_file="$(mktemp)"
-          (cd release && find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 \
+          # Every file, at any depth: an artifact that arrives in a
+          # subdirectory must still be summed, not silently left out.
+          (cd release && find . -type f ! -name SHA256SUMS -print0 \
             | sort -z | xargs -0 sha256sum >"$checksum_file")
           mv "$checksum_file" release/SHA256SUMS
       - name: Publish immutable-tag release assets
         env: {GH_TOKEN: '${{ github.token }}'}
-        run: gh release create "$GITHUB_REF_NAME" release/* --verify-tag --generate-notes --draft
+        # Assets are enumerated as files rather than with release/*, which
+        # would hand any directory to gh as an asset and fail the job.
+        run: |
+          set -euo pipefail
+          mapfile -d '' assets < <(find release -type f -print0 | sort -z)
+          test "${#assets[@]}" -gt 1
+          gh release create "$GITHUB_REF_NAME" "${assets[@]}" --verify-tag --generate-notes --draft
 
   pypi-publish:
     # Last in the workflow, and behind a required approval, because it is the
