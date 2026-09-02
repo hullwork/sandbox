@@ -1,7 +1,7 @@
 # The build context is the repository root, not runtime/, because
 # sandbox_platform/safe_stdout.py and the inlined File Service live elsewhere in
 # the repository.
-FROM python:3.14-alpine@sha256:05b2b8b732ecd268fee8727a369f936f022d1321b59befd13c30ede22769dcdc
+FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
 
 # The Agent session running in the sandbox must be able to verify the code and detect dependencies on the spot:
 # - nodejs/npm: "Developing Angry Birds" two sessions (2026-08-20) writing JS front-end in the sandbox,
