@@ -21,9 +21,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/convee/sandbox"
-Repository = "https://github.com/convee/sandbox"
-Issues = "https://github.com/convee/sandbox/issues"
+Homepage = "https://github.com/hullwork/sandbox"
+Repository = "https://github.com/hullwork/sandbox"
+Issues = "https://github.com/hullwork/sandbox/issues"
 
 [project.scripts]
 sandbox-mcp = "sandbox_platform.mcp:main"

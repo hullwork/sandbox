@@ -14,7 +14,7 @@ the operation fails; it never falls back to executing on the host.
 > honestly not finished.
 
 > **Where this fits.** Sandbox Platform is one of four independently released
-> repositories. [`convee/platform-composition`](https://github.com/convee/platform-composition)
+> repositories. [`hullwork/platform-composition`](https://github.com/hullwork/platform-composition)
 > is the only place that describes all four together: what each one is, where the
 > boundaries between them are, and how to install the set on an enterprise cluster.
 > This README does not repeat any of that — it is about Sandbox Platform alone.

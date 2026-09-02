@@ -16,7 +16,7 @@ broken:
    saying why it is exiting, so that line was exactly the one being dropped.
 
 This is not a local concern. ``sandbox_platform`` is a published consumer SDK,
-and ``convee/agent`` installs this proxy in its server entrypoint before it
+and ``hullwork/agent`` installs this proxy in its server entrypoint before it
 checks any prerequisite. Measured there: two unrelated startup refusals, whose
 next steps have nothing in common, both exited 1 having written zero bytes to
 stdout and stderr.

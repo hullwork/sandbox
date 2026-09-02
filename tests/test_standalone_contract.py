@@ -44,8 +44,8 @@ class StandaloneContractTests(unittest.TestCase):
         # the parent's own namespace is the plural SITES_*. Ban the prefixes.
         self.assertEqual(self.prefix_offenders(("AGENT_", "SITES_", "SITE_")), [])
         banned = (
-            "github.com/convee/agent",
-            "github.com/convee/site",
+            "github.com/hullwork/agent",
+            "github.com/hullwork/site",
             "Vercel",
             "runtime_identity",
             "automation-postgres",

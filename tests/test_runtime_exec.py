@@ -60,6 +60,28 @@ def process_alive(pid: int) -> bool:
 
 
 def wait_until_dead(pid: int, timeout: float = 3.0) -> bool:
+    """Wait for one pid to leave the process table.
+
+    KNOWN FLAKE. The two ShellSessionExpiryTests cases below fail
+    intermittently during a full ``make test`` run and pass every time in
+    isolation. The cause is not yet known. Four explanations were measured and
+    all four are wrong, recorded here so the next attempt does not repeat them:
+
+    - Not load. Under two concurrent suite runs the child still dies within
+      20ms, measured over four rounds.
+    - Not the reader thread holding the PTY open. Forcing ``close()`` down the
+      branch that returns before ``os.close(master_fd)`` leaves both cases
+      green, in zero seconds.
+    - Not a budget shorter than ``READER_JOIN_SECONDS`` (5s). Raising this to
+      15s did not stop the failures.
+    - Not a zombie read as alive. ``process_alive`` already rejects state Z.
+
+    What is established: two independent paths kill the child, so a mutation
+    that suppresses only one leaves these cases green. Suppressing ``killpg``
+    alone keeps them green for 30s; suppressing only the PTY close keeps them
+    green in 0s; suppressing both turns both red after 60s. Any future attempt
+    has to remove both before concluding anything from a green run.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not process_alive(pid):
