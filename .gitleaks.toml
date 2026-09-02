@@ -1,0 +1,23 @@
+# gitleaks configuration: default rules plus this repository's exemptions.
+title = "sandbox"
+
+[extend]
+useDefault = true
+
+# generic-api-key fires on a fixed non-secret sandbox ID asserted in an
+# authorization test: `sb-0123456789ab`, a placeholder with the shape of an ID
+# and none of the meaning.
+#
+# This replaces a .gitleaksignore entry, which identified the finding by
+# fingerprint -- commit SHA plus line number. Both change whenever the file is
+# touched, and the squashed history changed the commit for every line at once,
+# so the exemption stopped applying and the scan has been failing since. An
+# allowlist keyed on the rule, the file and the exact string survives edits that
+# do not change the thing being exempted.
+[[allowlists]]
+description = "Placeholder sandbox ID in an authorization test, not a credential"
+condition = "AND"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/test_api_authorization\.py$''']
+regexTarget = "secret"
+regexes = ['''^sb-0123456789ab$''']

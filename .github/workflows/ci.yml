@@ -131,7 +131,7 @@ jobs:
           tar --extract --gzip --file "/tmp/${archive}" --directory /tmp gitleaks
           /tmp/gitleaks version
       - name: Scan complete Git history
-        run: /tmp/gitleaks git --redact --verbose --no-banner .
+        run: /tmp/gitleaks git --redact --verbose --no-banner -c .gitleaks.toml .
 
   vulnerabilities:
     runs-on: ubuntu-latest
