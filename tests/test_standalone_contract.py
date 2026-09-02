@@ -63,11 +63,7 @@ class StandaloneContractTests(unittest.TestCase):
             "sites/" + "mcp",
             "see infra bootstrap",
         )
-        offenders = self.marker_offenders(banned)
-        pending = {"mcp.py", "sandbox_cli.py", "sandbox_client.py", "sandboxctl.py"}
-        if offenders and {entry.split(":", 1)[0] for entry in offenders} <= pending:
-            self.skipTest(f"pending W2 merge: {offenders}")
-        self.assertEqual(offenders, [])
+        self.assertEqual(self.marker_offenders(banned), [])
 
     @staticmethod
     def reviewed_sources() -> list[pathlib.Path]:
