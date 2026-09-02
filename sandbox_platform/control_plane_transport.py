@@ -31,6 +31,32 @@ class ControlPlaneError(RuntimeError):
 RESERVED_HEADERS = frozenset({"authorization", "x-acting-subject"})
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Turn every 3xx into an HTTPError instead of a second request.
+
+    urllib's default handler follows a redirect with the original headers,
+    ``Authorization`` included. The Control Plane never answers 3xx, so the
+    only thing a redirect can be is something in front of it (an ingress, a
+    console proxy, a hijacked name) pointing the SDK - and the long-lived
+    token it carries - somewhere else. Refusing costs nothing here.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_RefuseRedirects())
+
+
+def urlopen_without_redirects(request: urllib.request.Request, *, timeout: float):
+    """``urllib.request.urlopen`` that raises ``HTTPError`` on 3xx.
+
+    Every credentialed request the SDK makes goes through here: Control Plane
+    calls, object-ticket transfers and the Runtime stream alike.
+    """
+    return _OPENER.open(request, timeout=timeout)
+
+
 class ControlPlaneTransport:
     def __init__(
         self,
@@ -104,12 +130,19 @@ class ControlPlaneTransport:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with urlopen_without_redirects(request, timeout=timeout) as response:
                 raw = response.read()
                 content_type = response.headers.get(
                     "Content-Type", "application/json"
                 )
         except urllib.error.HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ControlPlaneError(
+                    exc.code,
+                    f"Control Plane returned a redirect (HTTP {exc.code} to "
+                    f"{exc.headers.get('Location')!r}); the SDK does not follow "
+                    "redirects",
+                ) from exc
             raw = exc.read()
             try:
                 detail = json.loads(raw).get("error")

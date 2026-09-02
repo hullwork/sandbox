@@ -24,7 +24,11 @@ import urllib.request
 import uuid
 
 from sandbox_platform import __version__
-from sandbox_platform.control_plane_transport import ControlPlaneError, ControlPlaneTransport
+from sandbox_platform.control_plane_transport import (
+    ControlPlaneError,
+    ControlPlaneTransport,
+    urlopen_without_redirects,
+)
 
 PROTOCOL_VERSION = "2026-07-28"
 # Upper bound for settling interrupted SSE reader threads. After shutdown,
@@ -370,7 +374,7 @@ class SandboxManager:
             method=ticket["method"],
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urlopen_without_redirects(request, timeout=120) as response:
                 result = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raise ControlPlaneError(exc.code, "object-store blob upload failed") from exc
@@ -442,7 +446,7 @@ class SandboxManager:
             method="GET",
         )
         try:
-            return urllib.request.urlopen(request, timeout=30)
+            return urlopen_without_redirects(request, timeout=30)
         except urllib.error.HTTPError as exc:
             raw = exc.read()
             try:
@@ -1046,7 +1050,7 @@ class SandboxManager:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(
+            with urlopen_without_redirects(
                 request,
                 timeout=timeout_seconds + 15,
             ) as response:
