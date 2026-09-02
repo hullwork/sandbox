@@ -7,7 +7,9 @@ in the implementation turns a test red rather than passing silently:
 * a workspace scoped token is only as good as its signature: a token whose
   signature segment or payload segment was altered, one signed with another
   key, or one minted for a different workspace, is a 401 on the file routes
-  before any downstream call (``verify_access_token``);
+  before any downstream call (``verify_access_token``); and a validly signed
+  token is still refused when its subject names another workspace or
+  sandbox, its kind does not fit the route, or its ``exp`` has passed;
 * administration routes refuse a tenant key, and refuse an admin key that
   is acting as a tenant through ``X-Sandbox-Tenant`` (``require_admin``);
 * a tenant key that sends ``X-Sandbox-Tenant`` is refused, including when the
@@ -61,6 +63,37 @@ PROBE_BODY = """
         "other_workspace": other["access_token"],
         "no_signature": payload,
     }
+    # Tokens with a valid signature whose claims must still be refused: the
+    # subject names another workspace / sandbox, the kind is wrong for the
+    # route, or exp is in the past. Minted here the way issue_access_token
+    # does, so only the claim under test differs.
+    def mint(claims):
+        encoded = control_plane.b64url_encode(
+            _json.dumps(claims, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        )
+        return encoded + "." + control_plane.b64url_encode(
+            hmac.new(control_plane.SIGNING_KEY, encoded.encode("ascii"), hashlib.sha256).digest()
+        )
+
+    sb = "sb-0123456789ab"
+    results["preseed_runtime"] = control_plane.STORE.admit_runtime("tenant-a", sb, ws, "default", 5)
+    now = int(__import__("time").time())
+    scoped = {"aud": "sandbox-control-plane", "exp": now + 600}
+    claim_tokens = {
+        "ws_expired": mint({**scoped, "kind": "workspace", "sub": ws, "exp": now - 10}),
+        "ws_other_subject": mint({**scoped, "kind": "workspace", "sub": "ws-ffffffffffff"}),
+        "ws_sandbox_kind": mint({**scoped, "kind": "sandbox", "sub": sb}),
+    }
+    for label, bad in claim_tokens.items():
+        call(f"files_{label}", "GET", f"/v1/workspaces/{ws}/files/list?path=.", bad)
+        call(f"write_{label}", "POST", f"/v1/workspaces/{ws}/files/write", bad, {"path": "a.txt", "content": "x"})
+    mcp_body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    call("mcp_valid", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "sandbox", "sub": sb}), mcp_body)
+    call("mcp_expired", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "sandbox", "sub": sb, "exp": now - 10}), mcp_body)
+    call("mcp_other_subject", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "sandbox", "sub": "sb-ffffffffffff"}), mcp_body)
+    call("mcp_workspace_kind", "POST", f"/v1/sandboxes/{sb}/mcp", mint({**scoped, "kind": "workspace", "sub": ws}), mcp_body)
+    call("mcp_no_exp", "POST", f"/v1/sandboxes/{sb}/mcp", mint({"aud": "sandbox-control-plane", "kind": "sandbox", "sub": sb}), mcp_body)
+
     call("files_valid", "GET", f"/v1/workspaces/{ws}/files/list?path=.", token)
     call("write_valid", "POST", f"/v1/workspaces/{ws}/files/write", token, {"path": "a.txt", "content": "x"})
     for label, bad in bad_tokens.items():
@@ -132,6 +165,26 @@ class CredentialBoundaryTests(unittest.TestCase):
             for route in ("files", "write"):
                 with self.subTest(token=label, route=route):
                     self.assert_refused_before_downstream(f"{route}_{label}", 401)
+
+    def test_a_scoped_token_for_another_subject_or_kind_is_a_401(self) -> None:
+        for label in ("ws_other_subject", "ws_sandbox_kind"):
+            for route in ("files", "write"):
+                with self.subTest(token=label, route=route):
+                    self.assert_refused_before_downstream(f"{route}_{label}", 401)
+        for name in ("mcp_other_subject", "mcp_workspace_kind"):
+            with self.subTest(route=name):
+                self.assert_refused_before_downstream(name, 401)
+        # Control: a sandbox token with the right subject passes the gate and
+        # reaches the runtime lookup (the fake fails it downstream).
+        self.assertTrue(self.results["preseed_runtime"])
+        valid = self.response("mcp_valid")
+        self.assertNotEqual(valid["status"], 401, valid)
+        self.assertGreaterEqual(valid["kube_calls"], 1, valid)
+
+    def test_an_expired_scoped_token_is_a_401(self) -> None:
+        for name in ("files_ws_expired", "write_ws_expired", "mcp_expired", "mcp_no_exp"):
+            with self.subTest(route=name):
+                self.assert_refused_before_downstream(name, 401)
 
     def test_admin_routes_refuse_a_tenant_key(self) -> None:
         for label in ("list_tenants", "create_tenant", "issue_key", "audit", "admin_keys"):
