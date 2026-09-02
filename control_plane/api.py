@@ -2235,6 +2235,10 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # ObjectNotFound: the store said "no such object". An OSError, so it
+            # must be caught ahead of the 400 catch-all below.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2957,6 +2961,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.GATEWAY_TIMEOUT, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            # See do_GET: ObjectNotFound, ahead of the OSError catch-all.
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -2984,6 +2991,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(exc.status, {"error": str(exc)})
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
 
@@ -3213,5 +3222,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_runtime_driver_error(exc)
         except control_plane.ObjectStoreBusy as exc:
             self.send_object_store_busy(exc)
+        except FileNotFoundError as exc:
+            self.send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
         except (OSError, RuntimeError, ValueError) as exc:
             self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})

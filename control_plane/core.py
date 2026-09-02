@@ -1681,7 +1681,12 @@ MAX_LIST_ENTRIES = int(os.getenv("SANDBOX_MAX_LIST_ENTRIES", "10000"))
 if MAX_LIST_ENTRIES <= 0:
     raise ValueError("SANDBOX_MAX_LIST_ENTRIES must be greater than zero")
 
-_OUTAGE_STATUS = frozenset({500, 502, 503, 504})
+#: 429 sits with the 5xx: "slow down" is an instruction to wait, and the only
+#: wrong answer is to send the caller off to change a request that was fine.
+#: Some stores say it with a 503 and the code SlowDown instead; the code is
+#: honoured on its own so the classification does not depend on which spelling.
+_OUTAGE_STATUS = frozenset({429, 500, 502, 503, 504})
+_OUTAGE_CODES = frozenset({"SlowDown", "Throttling", "RequestLimitExceeded"})
 #: Transport failures: the request never got an answer. Named rather than
 #: inlined so a test can assert every one of them has a sample -- a branch
 #: nobody ever fed a matching value to is indistinguishable from one that
@@ -1709,14 +1714,41 @@ def failure_is_outage(error: BaseException) -> bool:
         status = (
             error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
         )
-        return status in _OUTAGE_STATUS
+        code = str(error.response.get("Error", {}).get("Code") or "")
+        return status in _OUTAGE_STATUS or code in _OUTAGE_CODES
     return isinstance(error, _OUTAGE_EXCEPTIONS)
 
 
+class ObjectNotFound(FileNotFoundError):
+    """The store answered, and the answer was "no such object".
+
+    A FileNotFoundError so the API layer can answer 404 instead of the 400 every other rejection
+    gets: a caller that mistyped a checkpoint id and a caller whose credentials are wrong used to
+    receive the same sentence, and neither could tell which of the two to fix."""
+
+
+def _client_status(error: BaseException) -> int | None:
+    if not isinstance(error, ClientError):
+        return None
+    status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+    return int(status) if isinstance(status, int) else None
+
+
 def _translate(error: BaseException) -> BaseException:
+    """The exception the caller sees. Never the store's own text (see failure_is_outage)."""
     if failure_is_outage(error):
         return ObjectStoreUnavailable(
             "object storage is unreachable; retry shortly"
+        )
+    status = _client_status(error)
+    if status == 404:
+        return ObjectNotFound("object not found")
+    if status == 403:
+        # The request was understood and refused on identity: the caller should
+        # look at the credentials and the bucket policy, not at the request.
+        return RuntimeError(
+            "object storage refused access; check the object storage "
+            "credentials and bucket policy"
         )
     return RuntimeError("object storage rejected the operation")
 
