@@ -1832,24 +1832,31 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {"status": "ready"})
             return
         if path == "/metrics":
-            #Same level as /healthz: No authentication required, NetworkPolicy determines who can be caught.
-            #The indicator does not contain any tenant identification, see the description at METRICS.
+            # Same footing as /healthz: no authentication, NetworkPolicy decides
+            # who can scrape it. The metrics carry no tenant identity; see the
+            # note at METRICS.
             self.send_bytes(
                 HTTPStatus.OK, control_plane.METRICS.render(), metrics_lib.CONTENT_TYPE
             )
             return
         if path == "/healthz":
-            #Depends on the health check, not the readiness probe - readiness is /readyz. Here we explore the downstream areas one by one,
-            #Either failure is non-200, and the criteria are intentionally stricter than /readyz: its consumers are people and deployments
-            #Deployment verification and sandbox_client connectivity probes
-            #Connectivity self-test, the price of red reporting is "a certain step failed", not "the only copy was removed"
-            #"Loss of flow". The same check is hung on different gates, and the explosion radius differs by an order of magnitude.
-            #🔴 Don’t point kubelet’s readinessProbe back here – that’s what was fixed this time
-            #That article: The object storage was shaken, and even the exec/list/release of the sandbox that was already running was broken.
+            # A dependency health check, not the readiness probe - readiness is
+            # /readyz. This walks every downstream dependency in turn and any
+            # failure is a non-200. It is deliberately stricter than /readyz
+            # because its consumers are people, deployment verification and the
+            # sandbox_client connectivity self-test: a red here costs "one step
+            # failed", not "the only replica was pulled out of the Service".
+            # The same check wired to a different gate has a blast radius an
+            # order of magnitude larger.
+            # 🔴 Never point kubelet's readinessProbe back at this path. That
+            # was the incident this fixed: the object store blipped, and even
+            # exec/list/release on sandboxes that were already running broke.
             if control_plane._SHUTTING_DOWN.is_set():
-                #Even if you close this item in the layout, you still have to report 503: The physical examination should also truthfully say "This copy is being withdrawn."
-                #livez does not follow the change: it is a survival probe, and failure will cause a kubelet restart.
-                #And we're about to exit normally.
+                # Report 503 even though no probe is wired to this path: a health
+                # check must say truthfully that this replica is being withdrawn.
+                # /livez does not follow suit: it is the liveness probe, its
+                # failure makes kubelet restart the Pod, and we are about to
+                # exit cleanly on our own.
                 self.send_json(
                     HTTPStatus.SERVICE_UNAVAILABLE,
                     {"status": "shutting down"},
