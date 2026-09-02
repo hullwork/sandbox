@@ -562,6 +562,24 @@ class ShellSession:
             self._cleanup_command_file_locked()
             self.command_started_at = None
             self._condition.notify_all()
+        # Interactive bash puts each job in its own process group, so a
+        # command still running here is not in the shell's group and killpg
+        # below will miss it. What used to carry it away was SIGHUP from the
+        # controlling terminal - but that arrives when the master closes,
+        # which happens after the leader is already dead and the terminal has
+        # no foreground group left to signal. Ask the terminal while the
+        # answer still exists.
+        foreground = None
+        try:
+            foreground = os.tcgetpgrp(self.master_fd)
+        except OSError:
+            pass
+        if foreground is not None and foreground > 0:
+            try:
+                if foreground != os.getpgid(self.process.pid):
+                    os.killpg(foreground, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         if self.process.poll() is None:
             try:
                 os.killpg(self.process.pid, signal.SIGKILL)
