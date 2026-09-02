@@ -50,9 +50,12 @@ packages = ["sandbox_platform"]
 dev-mode-exact = true
 
 [tool.hatch.build.targets.sdist]
+# Patterns are gitignore-style, so a bare "README.md" matched every README at
+# any depth and the sdist carried docs/, observability/ and tests/ copies of
+# one. The leading slash anchors each entry to the repository root.
 include = [
-  "sandbox_platform/",
-  "README.md",
-  "LICENSE",
-  "pyproject.toml",
+  "/sandbox_platform/",
+  "/README.md",
+  "/LICENSE",
+  "/pyproject.toml",
 ]
