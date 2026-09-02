@@ -9,7 +9,7 @@ description = "Execution-as-a-service SDK, MCP bridge, and operator CLI for Sand
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
-authors = [{ name = "Convee" }]
+authors = [{ name = "Hullwork" }]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: MIT License",

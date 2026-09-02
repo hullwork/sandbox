@@ -72,7 +72,7 @@ Fill it in with exactly these values:
 | Field | Value |
 | --- | --- |
 | PyPI Project Name | `sandbox-platform` |
-| Owner | `convee` |
+| Owner | `hullwork` |
 | Repository name | `sandbox` |
 | Workflow name | `release.yml` |
 | Environment name | `pypi` |
