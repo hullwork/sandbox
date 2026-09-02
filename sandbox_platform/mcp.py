@@ -103,7 +103,12 @@ TOOLS = [
     },
     {
         "name": "sandbox_status",
-        "description": "Show the workspace and runtime (gVisor Pod) status bound to this session.",
+        "description": (
+            "Show this process's cached lease for the session: workspace and "
+            "runtime (gVisor Pod) ids as last seen. It does not contact the "
+            "Control Plane, so it cannot tell whether either is still reachable; "
+            "run shell to find out."
+        ),
         "inputSchema": {"type": "object", "properties": {}},
     },
     # File tools match the backend agent surface. SandboxManager owns HTTP and
