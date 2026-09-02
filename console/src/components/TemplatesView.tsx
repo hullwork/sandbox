@@ -177,6 +177,9 @@ export default function TemplatesView({
               <input
                 value={draftId}
                 placeholder="playwright"
+                autoFocus
+                autoCapitalize="none"
+                autoCorrect="off"
                 spellCheck={false}
                 onChange={(event) => setDraftId(event.target.value)}
               />
@@ -185,7 +188,7 @@ export default function TemplatesView({
               <span>{t("templates.image")}</span>
               <input
                 value={draftImage}
-                placeholder="ghcr.io/convee/sandbox-xxx:tag"
+                placeholder="ghcr.io/hullwork/sandbox-runtime:tag"
                 spellCheck={false}
                 onChange={(event) => setDraftImage(event.target.value)}
               />

@@ -117,7 +117,9 @@ export default function LoginView({
           <span>{t("login.apiKey")}</span>
           <input
             type="password"
+            name="api-key"
             value={token}
+            autoFocus
             autoComplete="off"
             spellCheck={false}
             placeholder="sk_<random>_admin_… / sk_<random>_<tenant>_…"

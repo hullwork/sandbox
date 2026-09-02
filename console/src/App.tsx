@@ -43,6 +43,29 @@ import type { WhoamiView } from "./types";
 
 type Tab = "overview" | "tenants" | "templates" | "observability";
 
+const TABS: readonly Tab[] = ["overview", "tenants", "templates", "observability"];
+// Which section is open survives a reload, in the same tab-scoped storage as the
+// credential and cleared with it. It is UI state, not a credential, and it never
+// reaches the URL. A tab the identity cannot see falls back to the overview.
+const TAB_KEY = "sandbox-console-tab";
+
+function loadTab(): Tab {
+  try {
+    const saved = window.sessionStorage.getItem(TAB_KEY);
+    return TABS.includes(saved as Tab) ? (saved as Tab) : "overview";
+  } catch {
+    return "overview";
+  }
+}
+
+function saveTab(tab: Tab): void {
+  try {
+    window.sessionStorage.setItem(TAB_KEY, tab);
+  } catch {
+    // Storage can be unavailable; the selection still applies in memory.
+  }
+}
+
 export default function App() {
   const { t } = useI18n();
   const [token, setToken] = useState(loadToken);
@@ -51,12 +74,16 @@ export default function App() {
   const [ssoSession, setSsoSession] = useState(false);
   const [checkingSession, setCheckingSession] = useState(!loadToken());
   const [whoami, setWhoami] = useState<WhoamiView | null>(null);
-  const [tab, setTab] = useState<Tab>("overview");
+  const [tab, setTab] = useState<Tab>(loadTab);
   const [error, setError] = useState<LocalizedError | null>(null);
   const [sessionNote, setSessionNote] = useState<TranslationKey | null>(null);
 
   const logout = useCallback((note: TranslationKey) => {
-    void api.logout().catch(() => undefined);
+    // Only a single-sign-on session has anything server-side to end. An API-key
+    // session would just produce a pointless 401 in the Control Plane log.
+    if (ssoSession) {
+      void api.logout().catch(() => undefined);
+    }
     clearToken();
     setToken("");
     setSsoSession(false);
@@ -64,7 +91,14 @@ export default function App() {
     setError(null);
     setTab("overview");
     setSessionNote(note);
+  }, [ssoSession]);
+
+  const selectTab = useCallback((next: Tab) => {
+    setTab(next);
+    saveTab(next);
   }, []);
+
+  const clearError = useCallback(() => setError(null), []);
 
   useEffect(() => {
     if (token) return;
@@ -98,7 +132,7 @@ export default function App() {
             ? { message: cause.message }
             : { message: String(cause) },
     );
-  }, [logout, t]);
+  }, [logout]);
 
   // sessionStorage may still hold a credential after a refresh, while identity is
   // no longer in memory. Ask Control Plane again instead of persisting capabilities: cached
@@ -181,6 +215,9 @@ export default function App() {
         }]
       : []),
   ];
+  // The remembered tab may belong to a capability this identity lacks, or to one
+  // whoami has not confirmed yet. Render what is visible, keep the preference.
+  const activeTab: Tab = tabs.some((item) => item.id === tab) ? tab : "overview";
 
   return (
     <div className="app">
@@ -200,9 +237,9 @@ export default function App() {
             <button
               key={item.id}
               type="button"
-              className={`tab ${tab === item.id ? "is-active" : ""}`}
-              aria-current={tab === item.id ? "page" : undefined}
-              onClick={() => setTab(item.id)}
+              className={`tab ${activeTab === item.id ? "is-active" : ""}`}
+              aria-current={activeTab === item.id ? "page" : undefined}
+              onClick={() => selectTab(item.id)}
             >
               {item.icon}
               <span>{item.label}</span>
@@ -255,18 +292,20 @@ export default function App() {
           </div>
         ) : null}
 
-        {tab === "overview" ? <OverviewView onError={handleError} /> : null}
-        {tab === "tenants" && canManageTenants ? (
+        {activeTab === "overview" ? (
+          <OverviewView onError={handleError} onRecover={clearError} />
+        ) : null}
+        {activeTab === "tenants" && canManageTenants ? (
           <TenantsView onError={handleError} />
         ) : null}
-        {tab === "templates" ? (
+        {activeTab === "templates" ? (
           <TemplatesView
             canReadAll={canReadAllTemplates}
             canWrite={canWriteTemplates}
             onError={handleError}
           />
         ) : null}
-        {tab === "observability" && grafana ? (
+        {activeTab === "observability" && grafana ? (
           <ObservabilityView grafana={grafana} />
         ) : null}
       </main>

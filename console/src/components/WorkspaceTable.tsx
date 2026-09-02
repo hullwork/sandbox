@@ -64,11 +64,11 @@ export default function WorkspaceTable({
               </tr>
             </thead>
             <tbody>
-              {workspaces.map((item) => {
+              {workspaces.map((item, index) => {
                 const id = item.id ?? "";
                 const overdue = isPast(item.idle_expires_at);
                 return (
-                  <tr key={id || Math.random()}>
+                  <tr key={id || `row-${index}`}>
                     <td className="mono">{id || "—"}</td>
                     <td>
                       {item.status === "ready" ? (

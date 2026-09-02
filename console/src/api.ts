@@ -220,8 +220,11 @@ const liveApi: ControlPlaneApi = {
     );
   },
 
-  readWorkspaceFile(id, path) {
+  readWorkspaceFile(id, path, offset) {
     const query = new URLSearchParams({ path });
+    if (offset !== undefined && offset > 1) {
+      query.set("offset", String(offset));
+    }
     return request<WorkspaceReadView>(
       `/v1/workspaces/${encodeURIComponent(id)}/files/read?${query}`,
     );

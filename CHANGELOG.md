@@ -48,7 +48,15 @@ Versioning after its first public release.
 - The repository is self-contained: the README no longer presents it as one of
   several related repositories, and the `Package` descriptor for a separate
   infrastructure product was removed from the chart.
-
+- Console: the open section survives a reload (kept in the same tab-scoped storage as
+  the credential and cleared with it; a section the identity cannot see falls back to
+  the overview). The overview runs one refresh at a time, skips ticks while the tab is
+  hidden and refreshes on return, and drops the outage banner once a refresh succeeds
+  again; a refresh after a reclaim or delete waits for any in-flight poll instead of
+  joining it. The file browser starts at the root of each workspace, marks the file
+  being read, ignores responses that a later click overtook, pages a truncated file
+  through `next_offset`, and closes on Escape. The one-time key dialog focuses Copy and
+  closes on Escape; the key panel scrolls into view when opened and Enter issues a key.
 - Control Plane speaks S3 through `boto3` (Apache-2.0) instead of running the MinIO
   Client as a subprocess. `mc` is AGPL-3.0 and was the only strong-copyleft component
   in any image built here; the notices entry and the README's "known limitations"
