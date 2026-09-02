@@ -692,7 +692,7 @@ paths:
       <<: *adminRead
       operationId: listAuditEvents
       tags: [Administration]
-      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000}}, {name: cursor, in: query, schema: {type: string}}]
+      parameters: [{name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000}}]
   /v1/admin/templates:
     get:
       <<: *adminRead
@@ -715,6 +715,7 @@ paths:
       <<: *adminDelete
       operationId: deleteAdminTemplate
       tags: [Administration]
+      parameters: [{name: tenant_id, in: query, schema: {type: string}, description: "Owning tenant of the template; omitted or empty means the global template ('*')"}]
 
 components:
   securitySchemes:
@@ -831,13 +832,13 @@ components:
     Timestamp: {type: string, format: date-time}
     Health:
       type: object
-      required: [status]
-      additionalProperties: true
+      required: [status, database, kubernetes, object_storage]
+      additionalProperties: false
       properties:
-        status: {type: string}
-        kubernetes: {type: object, additionalProperties: true}
-        postgresql: {type: object, additionalProperties: true}
-        object_storage: {type: object, additionalProperties: true}
+        status: {type: string, const: ok}
+        database: {type: string, enum: [ok, unconfigured], description: unconfigured when no SANDBOX_STORE_BACKEND is set}
+        kubernetes: {type: string, const: ok}
+        object_storage: {type: string, enum: [ok, unchecked], description: unchecked when OBJECT_STORE_HEALTH_PATH is empty}
     Identity:
       type: object
       required: [kind, tenant_id, key_id, acting_subject, capabilities]
@@ -855,8 +856,18 @@ components:
           properties:
             name: {type: string}
             status: {type: string, enum: [active, suspended]}
-            max_workspaces: {type: integer, minimum: 0}
+            max_workspaces: {type: integer, minimum: 1}
             used_workspaces: {type: integer, minimum: 0}
+        # Administrators only: whether the embedded observability panel exists.
+        grafana:
+          type: object
+          required: [enabled]
+          additionalProperties: false
+          properties:
+            enabled: {type: boolean}
+            route: {type: string}
+            dashboardUid: {type: string}
+            panels: {type: array, items: {type: object, required: [id, title], additionalProperties: false, properties: {id: {type: integer}, title: {type: string}}}}
     # owner: management plane only, for the same reason as OwnerQuery.
     # The principal a workspace is resolved for; free text the tenant picks,
     # used only as derivation material. Top-level principal_id/principal_type
@@ -1120,9 +1131,12 @@ components:
           properties: {bucket: {type: string}, key: {type: string}}
     WorkspaceImportRequest:
       allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [destination], properties: {destination: {type: string, pattern: '^data/uploads/'}}}]
+    # archive=true exports the whole artifacts tree as one gzip object and then
+    # requires workspace_path to be exactly "artifacts"; otherwise workspace_path
+    # names one file under artifacts/.
     WorkspaceExportRequest:
-      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [workspace_path], properties: {workspace_path: {type: string, pattern: '^artifacts/'}}}]
-    CreateTenantRequest: {type: object, required: [id], properties: {id: {type: string}, display_name: {type: string}, max_workspaces: {type: integer, minimum: 0}, max_runtimes: {type: integer, minimum: 0}}}
+      allOf: [{$ref: '#/components/schemas/ObjectLocator'}, {type: object, required: [workspace_path], properties: {workspace_path: {type: string, pattern: '^artifacts(/.+)?$'}, archive: {type: boolean, default: false}}}]
+    CreateTenantRequest: {type: object, required: [id], properties: {id: {type: string}, display_name: {type: string}, max_workspaces: {type: integer, minimum: 1}, max_runtimes: {type: integer, minimum: 1}}}
     Tenant:
       type: object
       required: [id, display_name, status, max_workspaces, max_runtimes]
@@ -1131,8 +1145,8 @@ components:
         id: {type: string}
         display_name: {type: string}
         status: {type: string, enum: [active, suspended]}
-        max_workspaces: {type: integer, minimum: 0}
-        max_runtimes: {type: integer, minimum: 0}
+        max_workspaces: {type: integer, minimum: 1}
+        max_runtimes: {type: integer, minimum: 1}
         workspaces_in_use: {type: integer, minimum: 0, description: Present in the list view only}
     IssuedApiKey:
       type: object

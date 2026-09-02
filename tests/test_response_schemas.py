@@ -151,6 +151,77 @@ def response_literal_keys(marker: str) -> list[set[str]]:
     return found
 
 
+def nested_response_literals(marker: str) -> list[tuple[set[str], dict[str, Any]]]:
+    """Every dict literal (at any depth) inside a ``send_json`` payload carrying ``marker``.
+
+    Returns ``(keys, constants)`` per literal, where ``constants`` holds the
+    entries whose value is a literal constant, so a test can check not only
+    the key set but also the type the implementation actually sends
+    (``"kubernetes": "ok"`` is a string, whatever the contract once said).
+    """
+    source = (ROOT / "control_plane/api.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    found: list[tuple[set[str], dict[str, Any]]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "send_json"
+            and len(node.args) == 2
+        ):
+            continue
+        for literal in ast.walk(node.args[1]):
+            if not isinstance(literal, ast.Dict):
+                continue
+            keys = {key.value for key in literal.keys if isinstance(key, ast.Constant)}
+            if marker not in keys:
+                continue
+            constants = {
+                key.value: value.value
+                for key, value in zip(literal.keys, literal.values)
+                if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
+            }
+            found.append((keys, constants))
+    return found
+
+
+def method_view_keys(method_name: str, variable: str = "view") -> tuple[set[str], set[str]]:
+    """Keys of the dict literal assigned to ``variable`` in an api.py method, and
+    the keys later added with ``variable["key"] = ...``.
+
+    ``whoami_view`` builds its answer this way rather than as one literal, which
+    is how ``grafana`` stayed out of ``Identity`` unnoticed.
+    """
+    source = (ROOT / "control_plane/api.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    functions = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == method_name
+    ]
+    if len(functions) != 1:
+        raise AssertionError(f"api.py must define {method_name} exactly once")
+    base: set[str] = set()
+    added: set[str] = set()
+    for node in ast.walk(functions[0]):
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+        else:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and target.id == variable and isinstance(node.value, ast.Dict):
+                base |= {key.value for key in node.value.keys if isinstance(key, ast.Constant)}
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == variable
+                and isinstance(target.slice, ast.Constant)
+            ):
+                added.add(target.slice.value)
+    return base, added
+
+
 class ValidatorSelfCheckTests(unittest.TestCase):
     """The validator must have discriminating power before it is trusted."""
 
@@ -262,6 +333,44 @@ class ApiLiteralSchemaTests(unittest.TestCase):
             keys = (keys - {"<view>"}) | (view_keys if "<view>" in keys else set())
             self.assertTrue(self.required("SandboxLease") <= keys, keys)
             self.assertTrue(keys <= self.properties("SandboxLease"), keys - self.properties("SandboxLease"))
+
+    def assert_constants_conform(self, schema_name: str, constants: dict[str, Any]) -> None:
+        properties = self.spec["components"]["schemas"][schema_name]["properties"]
+        for key, value in constants.items():
+            errors = validate(self.spec, properties[key], value, f"{schema_name}.{key}")
+            self.assertEqual(errors, [], errors)
+
+    def test_identity_view_matches_identity_schema(self) -> None:
+        # The literal is the always-present part; the subscript assignments
+        # (tenant block, grafana capabilities) are the optional part.
+        base, added = method_view_keys("whoami_view")
+        self.assertEqual(base, self.required("Identity"))
+        self.assertEqual(base | added, self.properties("Identity"))
+
+    def test_health_literal_matches_health_schema(self) -> None:
+        literals = nested_response_literals("database")
+        self.assertEqual(len(literals), 1, literals)
+        keys, constants = literals[0]
+        self.assertEqual(keys, self.properties("Health"))
+        self.assertEqual(keys, self.required("Health"))
+        self.assert_constants_conform("Health", constants)
+
+    def test_tenant_literals_match_tenant_schema(self) -> None:
+        literals = nested_response_literals("max_runtimes")
+        self.assertEqual(len(literals), 2, literals)
+        for keys, constants in literals:
+            self.assertTrue(self.required("Tenant") <= keys, keys)
+            self.assertTrue(keys <= self.properties("Tenant"), keys - self.properties("Tenant"))
+            self.assert_constants_conform("Tenant", constants)
+        self.assertIn(self.properties("Tenant"), [keys for keys, _ in literals])
+
+    def test_issued_key_literals_match_issued_api_key_schema(self) -> None:
+        literals = nested_response_literals("api_key")
+        self.assertEqual(len(literals), 2, literals)
+        for keys, constants in literals:
+            self.assertEqual(keys, self.properties("IssuedApiKey"))
+            self.assertEqual(keys, self.required("IssuedApiKey"))
+            self.assert_constants_conform("IssuedApiKey", constants)
 
     def test_error_literals_only_use_declared_keys(self) -> None:
         declared = self.properties("Error")
