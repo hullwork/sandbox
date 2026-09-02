@@ -143,7 +143,7 @@ class HelmPackageContractTests(unittest.TestCase):
             [
                 "helm", "template", "sandbox", str(CHART),
                 "--set-string", "scheduling.system.nodeSelector.example\\.com/node-role=system",
-                "--set-string", "runtime.nodeSelector.sandbox\\.convee\\.io/node-role=runtime",
+                "--set-string", "runtime.nodeSelector.sandbox\\.hullwork\\.com/node-role=runtime",
                 "--set-string", "runtime.tolerations[0].key=sandbox.hullwork.com/node-role",
                 "--set-string", "runtime.tolerations[0].operator=Equal",
                 "--set-string", "runtime.tolerations[0].value=runtime",

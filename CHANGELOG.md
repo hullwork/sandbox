@@ -35,6 +35,20 @@ Versioning after its first public release.
 
 ### Changed
 
+- **Breaking for existing clusters:** every label, annotation and node-selector key
+  the platform writes or reads now carries the `sandbox.hullwork.com/` prefix
+  (`sandbox-id`, `workspace-id`, `tenant`, `template`, `created-at`, `expires-at`,
+  `hard-expires-at`, `runtime-node`, `purpose`, and the `node-role` node label and
+  taint). The previous `convee.io/` and `sandbox.convee.io/` prefixes belonged to a
+  maintainer's personal domain. Runtime Pods created under the old prefix are
+  invisible to the new reaper: drain them before upgrading, and re-label Runtime
+  nodes. `tests/test_label_domain.py` refuses the retired prefix and
+  `tests/test_annotation_keys.py` reads the new keys back through the real driver
+  and reaper.
+- The repository is self-contained: the README no longer presents it as one of
+  several related repositories, and the `Package` descriptor for a separate
+  infrastructure product was removed from the chart.
+
 - Control Plane speaks S3 through `boto3` (Apache-2.0) instead of running the MinIO
   Client as a subprocess. `mc` is AGPL-3.0 and was the only strong-copyleft component
   in any image built here; the notices entry and the README's "known limitations"
