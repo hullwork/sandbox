@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 from .store import (
     GLOBAL_TENANT,
+    MANAGEMENT_TENANT,
     WORKSPACE_AT_CAPACITY,
     ApiKey,
     StoreError,
@@ -429,6 +430,16 @@ class ApiHandler(BaseHTTPRequestHandler):
         if not tenant_id:
             self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
             return False
+        if tenant_id == MANAGEMENT_TENANT:
+            # The reserved row is never a tenant anyone represents: neither a
+            # session whose tenant claim says so, nor an admin key naming it in
+            # X-Sandbox-Tenant. Representing it would hand out the management
+            # plane's own workspaces and runtimes as if they were a tenant's.
+            self.send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": f"tenant id is reserved: {tenant_id}"},
+            )
+            return False
         if control_plane.STORE is None:
             #Without storage, there is no concept of tenants; specifying a tenant is a configuration error, and it should be stated clearly rather than silently.
             #Single tenant processing.
@@ -508,7 +519,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    MANAGEMENT_TENANT = "management"
+    MANAGEMENT_TENANT = MANAGEMENT_TENANT
 
     def ensure_management_tenant(self) -> str:
         """The reserved tenant the unscoped management identity is filed under.
@@ -528,12 +539,9 @@ class ApiHandler(BaseHTTPRequestHandler):
         """
         if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
             try:
-                control_plane.STORE.create_tenant(
-                    self.MANAGEMENT_TENANT,
-                    "Reserved management-plane identity",
-                    max_workspaces=1024,
-                    max_runtimes=1024,
-                )
+                # Not create_tenant: that one refuses the reserved name so no
+                # caller can register it; this is the internal entry.
+                control_plane.STORE.create_management_tenant()
             except Exception:
                 if control_plane.STORE.get_tenant(self.MANAGEMENT_TENANT) is None:
                     raise
@@ -2824,7 +2832,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                         sandbox_id,
                         workspace_id,
                         template_id,
-                        self.tenant_id or "management",
+                        self.tenant_id or MANAGEMENT_TENANT,
                         limit,
                     )
                     view = control_plane.sandbox_view(pod)
@@ -2852,7 +2860,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                     sandbox_id,
                     workspace_id,
                     template_id,
-                    self.tenant_id or "management",
+                    self.tenant_id or MANAGEMENT_TENANT,
                     limit,
                 )
                 self.send_json(
