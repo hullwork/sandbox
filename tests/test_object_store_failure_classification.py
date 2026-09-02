@@ -1,11 +1,16 @@
-"""Classification of a failed mc invocation: storage out of reach, or request rejected.
+"""Classification of a failed object-store call: storage out of reach, or request rejected.
 
-``control_plane.core.mc_failure_is_outage`` decides that from stderr alone, and
-the two misjudgments cost differently - calling a missing object an outage only
-wastes a retry, while calling an unreachable endpoint a rejection sends the
-caller off to rotate credentials when it should have waited. The function had no
-test, so a marker could be reworded into one that never fires and every suite
-would stay green.
+``control_plane.core.failure_is_outage`` decides that, and the two misjudgments
+cost differently - calling a missing object an outage only wastes a retry, while
+calling an unreachable endpoint a rejection sends the caller off to rotate
+credentials when it should have waited.
+
+Until 2026-09-02 this read the stderr of an ``mc`` subprocess and matched
+substrings, and the note beside the markers admitted the hole: RGW answering 503
+while the cluster was degraded produced wording nobody had captured, so a real
+outage landed in "rejected" -- the expensive direction. botocore reports the
+status code, so a 5xx is now classified from the response. The sample for 503 in
+this file is the case the old implementation could not get right.
 
 ``core.py`` reads its environment on import, so the classification runs once in a
 subprocess under a minimal volume-role environment and the table is asserted here.
@@ -23,81 +28,88 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-# Keyed by the marker each sample is meant to exercise, so a marker that gains no
-# sample fails test_every_declared_marker_has_a_sample below.
-OUTAGE_SAMPLES = {
-    "connection refused": (
-        b'mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Get "http://store:9000/ws-1/a.txt": '
-        b"dial tcp 10.0.0.5:9000: connect: connection refused."
-    ),
-    "no such host": (
-        b'mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Get "http://store:9000/ws-1/a.txt": '
-        b"dial tcp: lookup store on 10.96.0.10:53: no such host."
-    ),
-    "i/o timeout": (
-        b'mc: <ERROR> Unable to write `store/ws-1/a.txt`. Put "http://store:9000/ws-1/a.txt": '
-        b"dial tcp 10.0.0.5:9000: i/o timeout."
-    ),
-    "context deadline exceeded": (
-        b'mc: <ERROR> Unable to list `store/ws-1`. Get "http://store:9000/ws-1": '
-        b"context deadline exceeded (Client.Timeout exceeded while awaiting headers)."
-    ),
-    "connection reset by peer": (
-        b"mc: <ERROR> Unable to write `store/ws-1/a.txt`. read tcp 10.0.0.9:41234->10.0.0.5:9000: "
-        b"read: connection reset by peer."
-    ),
-    "network is unreachable": (
-        b'mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Get "http://store:9000/ws-1/a.txt": '
-        b"dial tcp 10.0.0.5:9000: connect: network is unreachable."
-    ),
-    "no route to host": (
-        b'mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Get "http://store:9000/ws-1/a.txt": '
-        b"dial tcp 10.0.0.5:9000: connect: no route to host."
-    ),
-    # MinIO Server's phrasing; this sample proves the marker fires, not that the
-    # deployed store can produce it. See the note beside the marker in core.py.
-    "server not initialized": (
-        b"mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Server not initialized, please try again."
-    ),
-    "unable to initialize new alias": (
-        b"mc: <ERROR> Unable to initialize new alias from the provided credentials."
-    ),
+#: Keyed by the status each sample exercises, so a status that gains no sample
+#: fails test_every_outage_status_has_a_sample below.
+OUTAGE_STATUS_SAMPLES = {
+    500: "InternalError",
+    502: "BadGateway",
+    # The case the substring matcher never handled: Ceph RGW returns this while
+    # the cluster is degraded, and the caller has to wait, not re-sign.
+    503: "ServiceUnavailable",
+    504: "GatewayTimeout",
 }
 
-REJECTION_SAMPLES = {
-    "missing object": b"mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Object does not exist.",
-    "missing bucket": b"mc: <ERROR> Unable to stat `store/absent`. Bucket does not exist.",
-    "missing key": b"mc: <ERROR> Unable to stat `store/ws-1/a.txt`. The specified key does not exist.",
-    "denied": b"mc: <ERROR> Unable to copy `store/ws-1/a.txt`. Access Denied.",
-    "bad prefix": b"mc: <ERROR> Unable to list `store/ws-1/nope`. Prefix does not exist.",
-    # A non-zero exit that said nothing must not be promoted to an outage: an
-    # empty marker set means "unclassified", and unclassified is a rejection.
-    "silent failure": b"",
+#: Likewise for transport failures, keyed by the botocore exception class name.
+OUTAGE_EXCEPTION_SAMPLES = {
+    "EndpointConnectionError": {"endpoint_url": "http://127.0.0.1:1"},
+    "ConnectTimeoutError": {"endpoint_url": "http://127.0.0.1:1"},
+    "ReadTimeoutError": {"endpoint_url": "http://127.0.0.1:1"},
+    "ConnectionClosedError": {"endpoint_url": "http://127.0.0.1:1"},
 }
 
-CASE_SAMPLES = {
-    "shouting": b"mc: <ERROR> Unable to stat `store/ws-1/a.txt`. CONNECTION REFUSED.",
-    "mixed case": b"mc: <ERROR> Unable to stat `store/ws-1/a.txt`. Connection Refused.",
-}
-
-# stderr is external text; mc has no obligation to keep it valid UTF-8.
-UNDECODABLE_SAMPLES = {
-    "invalid utf-8 outage": b"mc: <ERROR> \xff\xfe connect: connection refused.",
-    "invalid utf-8 rejection": b"mc: <ERROR> \xff\xfe Access Denied.",
+#: Answered, and the answer was no. None of these may be promoted to an outage.
+REJECTION_STATUS_SAMPLES = {
+    400: "InvalidRequest",
+    403: "AccessDenied",
+    404: "NoSuchKey",
+    409: "BucketNotEmpty",
 }
 
 PROBE = """
 import json
+from botocore.exceptions import (
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 from control_plane import core
 
+TRANSPORT = {
+    "EndpointConnectionError": EndpointConnectionError,
+    "ConnectTimeoutError": ConnectTimeoutError,
+    "ReadTimeoutError": ReadTimeoutError,
+    "ConnectionClosedError": ConnectionClosedError,
+}
+
+
+def client_error(status, code):
+    return ClientError(
+        {
+            "Error": {"Code": code, "Message": "external text, never surfaced"},
+            "ResponseMetadata": {"HTTPStatusCode": status},
+        },
+        "GetObject",
+    )
+
+
+results = {}
+for status, code in OUTAGE_STATUS.items():
+    results[f"status-{status}"] = core.failure_is_outage(client_error(int(status), code))
+for status, code in REJECTION_STATUS.items():
+    results[f"status-{status}"] = core.failure_is_outage(client_error(int(status), code))
+for name, kwargs in TRANSPORT_SAMPLES.items():
+    results[name] = core.failure_is_outage(TRANSPORT[name](**kwargs))
+
+# A failure that is neither is unclassified, and unclassified is a rejection: an
+# exception nobody recognised must not be promoted into "wait and retry".
+results["unrecognised"] = core.failure_is_outage(RuntimeError("something else"))
+# A ClientError with no status at all, which is what a malformed or synthetic
+# response looks like.
+results["no-status"] = core.failure_is_outage(
+    ClientError({"Error": {"Code": "Weird"}}, "GetObject")
+)
+
 print(json.dumps({
-    "markers": list(core._MC_OUTAGE_MARKERS),
-    "results": {name: core.mc_failure_is_outage(value) for name, value in SAMPLES.items()},
+    "statuses": sorted(core._OUTAGE_STATUS),
+    "exceptions": [item.__name__ for item in core._OUTAGE_EXCEPTIONS],
+    "results": results,
 }))
 """
 
 
-def run_probe(samples: dict[str, bytes]) -> dict:
+def run_probe() -> dict:
     environment = {
         **os.environ,
         # The volume role skips the Kubernetes client, which core.py builds at
@@ -112,8 +124,13 @@ def run_probe(samples: dict[str, bytes]) -> dict:
         "OBJECT_STORE_SECRET_KEY": "test-secret",
         "PYTHONPATH": str(ROOT),
     }
+    preamble = (
+        f"OUTAGE_STATUS = {OUTAGE_STATUS_SAMPLES!r}\n"
+        f"REJECTION_STATUS = {REJECTION_STATUS_SAMPLES!r}\n"
+        f"TRANSPORT_SAMPLES = {OUTAGE_EXCEPTION_SAMPLES!r}\n"
+    )
     result = subprocess.run(
-        [sys.executable, "-c", f"SAMPLES = {samples!r}\n{PROBE}"],
+        [sys.executable, "-c", preamble + PROBE],
         cwd=ROOT,
         env=environment,
         capture_output=True,
@@ -128,38 +145,37 @@ def run_probe(samples: dict[str, bytes]) -> dict:
 class ObjectStoreFailureClassificationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.probe = run_probe(
-            {
-                **OUTAGE_SAMPLES,
-                **REJECTION_SAMPLES,
-                **CASE_SAMPLES,
-                **UNDECODABLE_SAMPLES,
-            }
+        cls.probe = run_probe()
+
+    def test_every_outage_status_has_a_sample(self) -> None:
+        # A status nobody ever fed a matching response to is indistinguishable
+        # from a status that cannot match anything.
+        self.assertEqual(
+            sorted(self.probe["statuses"]), sorted(OUTAGE_STATUS_SAMPLES)
         )
 
-    def test_every_declared_marker_has_a_sample(self) -> None:
-        # A marker nobody ever fed a matching string to is indistinguishable from
-        # a marker that cannot match anything.
-        self.assertEqual(sorted(self.probe["markers"]), sorted(OUTAGE_SAMPLES))
+    def test_every_outage_exception_has_a_sample(self) -> None:
+        self.assertEqual(
+            sorted(self.probe["exceptions"]),
+            sorted(OUTAGE_EXCEPTION_SAMPLES),
+        )
 
     def test_unreachable_storage_is_an_outage(self) -> None:
-        for name in OUTAGE_SAMPLES:
-            with self.subTest(marker=name):
+        for status in OUTAGE_STATUS_SAMPLES:
+            with self.subTest(status=status):
+                self.assertTrue(self.probe["results"][f"status-{status}"])
+        for name in OUTAGE_EXCEPTION_SAMPLES:
+            with self.subTest(exception=name):
                 self.assertTrue(self.probe["results"][name])
 
     def test_refused_requests_are_not_an_outage(self) -> None:
-        for name in REJECTION_SAMPLES:
-            with self.subTest(sample=name):
-                self.assertFalse(self.probe["results"][name])
+        for status in REJECTION_STATUS_SAMPLES:
+            with self.subTest(status=status):
+                self.assertFalse(self.probe["results"][f"status-{status}"])
 
-    def test_marker_matching_ignores_case(self) -> None:
-        for name in CASE_SAMPLES:
-            with self.subTest(sample=name):
-                self.assertTrue(self.probe["results"][name])
-
-    def test_undecodable_stderr_is_still_classified(self) -> None:
-        self.assertTrue(self.probe["results"]["invalid utf-8 outage"])
-        self.assertFalse(self.probe["results"]["invalid utf-8 rejection"])
+    def test_an_unclassified_failure_is_a_rejection(self) -> None:
+        self.assertFalse(self.probe["results"]["unrecognised"])
+        self.assertFalse(self.probe["results"]["no-status"])
 
 
 if __name__ == "__main__":

@@ -164,7 +164,7 @@ spec:
         # denominator always exists.
         - alert: SandboxObjectStoreQueueSaturated
           expr: >-
-            sandbox_mc_queue_depth / sandbox_mc_queue_limit > 0.75
+            sandbox_object_store_queue_depth / sandbox_object_store_queue_limit > 0.75
           for: 10m
           labels:
             severity: warning

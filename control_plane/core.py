@@ -29,6 +29,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import (
+    BotoCoreError,
+    ClientError,
+    ConnectionClosedError,
+    ConnectTimeoutError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
+
 import capability_ticket
 from . import metrics as metrics_lib
 from . import tracing, manifests, oidc, session
@@ -559,7 +570,7 @@ def object_store_env(
     return default
 
 
-# Object storage only requires S3 compatibility, not specifically MinIO: the endpoint can be a Service DNS name,
+# Object storage only requires S3 compatibility: the endpoint can be a Service DNS name,
 # http://<NodeIP>:<NodePort> across clusters, or a hosted service
 # (https://s3.example.com or a provider-specific S3 endpoint). Buckets are not created by the Control Plane;
 # the storage side initializes them, and only the names are known here.
@@ -578,16 +589,13 @@ OBJECT_STORE_WORKSPACE_BUCKET = object_store_env(
     "OBJECT_STORE_WORKSPACE_BUCKET",
     "sandbox-workspaces",
 )
-# Storage probe path for /healthz. The default is MinIO's ready endpoint, which only self-hosted MinIO has -
-# on hosted S3 (OSS/S3) this path is 404, and with the default the Control Plane's readinessProbe would
-# fail forever. Leave it empty to skip this probe (when the endpoint is hosted externally and has no anonymously reachable health endpoint).
+# Storage probe path for /healthz. Empty by default, which skips the probe. A vendor-specific
+# path such as /minio/health/ready is 404 on every other S3 implementation, so a default that
+# named one would make the Control Plane's readinessProbe fail forever everywhere else. Set it
+# only when the endpoint you deploy against has an anonymously reachable health endpoint.
 OBJECT_STORE_HEALTH_PATH = os.getenv(
     "OBJECT_STORE_HEALTH_PATH", ""
 )
-# mc is the MinIO Client binary itself (usable with any S3 endpoint), not the storage implementation,
-# so this one keeps its original name.
-OBJECT_STORE_CLIENT = os.getenv("OBJECT_STORE_CLIENT", "/usr/local/bin/mc")
-MC_ALIAS = "sandbox"
 OBJECT_STORE_SIGNATURE_VERSION = (
     os.getenv("OBJECT_STORE_SIGNATURE_VERSION", "S3v4").upper()
 )
@@ -613,15 +621,13 @@ for _name, _value in (
 ):
     if _value <= 0:
         raise ValueError(f"{_name} must be greater than zero")
-MAX_CONCURRENT_MC = int(os.getenv("SANDBOX_MAX_CONCURRENT_MC", "1"))
-if MAX_CONCURRENT_MC <= 0:
-    raise ValueError("SANDBOX_MAX_CONCURRENT_MC must be greater than zero")
-MC_GOMAXPROCS = int(os.getenv("SANDBOX_MC_GOMAXPROCS", "2"))
-if MC_GOMAXPROCS <= 0:
-    raise ValueError("SANDBOX_MC_GOMAXPROCS must be greater than zero")
-MC_GOMEMLIMIT = os.getenv("SANDBOX_MC_GOMEMLIMIT", "256MiB")
-if not re.fullmatch(r"[1-9][0-9]*(?:KiB|MiB|GiB)", MC_GOMEMLIMIT):
-    raise ValueError("SANDBOX_MC_GOMEMLIMIT must be a positive KiB/MiB/GiB value")
+MAX_CONCURRENT_OBJECT_OPS = int(
+    os.getenv("SANDBOX_MAX_CONCURRENT_OBJECT_OPS", "1")
+)
+if MAX_CONCURRENT_OBJECT_OPS <= 0:
+    raise ValueError(
+        "SANDBOX_MAX_CONCURRENT_OBJECT_OPS must be greater than zero"
+    )
 
 # Check after all required fields have been read, so that every missing one is reported in a single start.
 # SystemExit instead of KeyError: what the container wants is an instruction to follow, not a stack trace.
@@ -642,23 +648,24 @@ if _CONFIG_ERRORS:
         f"{len(_CONFIG_ERRORS)} item(s):\n  - "
         + "\n  - ".join(_CONFIG_ERRORS)
     )
-# mc is a Go binary with a materially larger RSS than these small Python
-# request threads. An unbounded ThreadingHTTPServer fan-out can otherwise
-# OOMKill Control Plane when several Agent runs persist messages/checkpoints at once.
-# Keep only one child inside the 1GiB Control Plane cgroup and independently constrain
-# the Go runtime; request threads still accept concurrent work and queue here.
-_MC_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_MC)
-# 🔴 The semaphore above bounds the RSS of mc child processes; it cannot bound the queued threads themselves.
-# ThreadingHTTPServer spawns one thread per request with no connection cap, and run_mc_file's timeout is
-# 180s - concurrent object operations block every thread on the semaphore, the thread count grows without bound, and the Control Plane
-# gets OOMKilled by its 1GiB cgroup. The reaper is a daemon thread in the same process and dies with it,
-# so sandboxes are no longer reclaimed. Guarding the child processes without guarding the queue is no guard at all.
+# An object operation holds its whole body in memory, so several at once inside
+# the 1GiB Control Plane cgroup is what OOMKills it when a few Agent runs persist
+# messages or checkpoints together. Keep one in flight; request threads still
+# accept concurrent work and queue below. This used to bound the RSS of `mc`
+# child processes, one per operation; the reason survives the subprocess.
+_OBJECT_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_OBJECT_OPS)
+# 🔴 The semaphore above bounds the work in flight; it cannot bound the queued threads themselves.
+# ThreadingHTTPServer spawns one thread per request with no connection cap, and the streaming
+# timeout is 180s - concurrent object operations block every thread on the semaphore, the thread
+# count grows without bound, and the Control Plane gets OOMKilled by its 1GiB cgroup. The reaper is
+# a daemon thread in the same process and dies with it, so sandboxes are no longer reclaimed.
+# Guarding the operations without guarding the queue is no guard at all.
 # This gate turns "cannot wait" into an explicit fail-fast: 503 immediately when full so the caller retries, instead of
-# piling up in memory. The depth is set by the resident overhead of a request thread and is unrelated to mc concurrency.
-MAX_MC_QUEUE = int(os.getenv("SANDBOX_MAX_MC_QUEUE", "32"))
-if MAX_MC_QUEUE <= 0:
-    raise ValueError("SANDBOX_MAX_MC_QUEUE must be greater than zero")
-_MC_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_MC_QUEUE)
+# piling up in memory. The depth is set by the resident overhead of a request thread and is unrelated to operation concurrency.
+MAX_OBJECT_QUEUE = int(os.getenv("SANDBOX_MAX_OBJECT_QUEUE", "32"))
+if MAX_OBJECT_QUEUE <= 0:
+    raise ValueError("SANDBOX_MAX_OBJECT_QUEUE must be greater than zero")
+_OBJECT_QUEUE_SLOTS = threading.BoundedSemaphore(MAX_OBJECT_QUEUE)
 
 
 # --- Metrics ----------------------------------------------------------------
@@ -777,8 +784,8 @@ OBJECT_TICKET_FAILURES = METRICS.register(
 )
 for _reason in ("bad_signature", "claims_rejected", "malformed", "replayed"):
     OBJECT_TICKET_FAILURES.ensure(reason=_reason)
-_MC_INFLIGHT = 0
-_MC_INFLIGHT_LOCK = threading.Lock()
+_OBJECT_INFLIGHT = 0
+_OBJECT_INFLIGHT_LOCK = threading.Lock()
 _CREATE_SLOTS = threading.BoundedSemaphore(MAX_INFLIGHT_CREATES)
 _CREATE_INFLIGHT = 0
 # 🔴 A Condition, not a Lock: the shutdown orchestration has to wait for these background provisionings to finish, and they run in create-*
@@ -807,16 +814,16 @@ def await_pending_creations(timeout: float) -> int:
     return 0
 
 
-def _mc_queue_depth() -> float:
-    with _MC_INFLIGHT_LOCK:
-        return float(_MC_INFLIGHT)
+def _object_queue_depth() -> float:
+    with _OBJECT_INFLIGHT_LOCK:
+        return float(_OBJECT_INFLIGHT)
 
 
 METRICS.register(
     metrics_lib.Gauge(
-        "sandbox_mc_queue_depth",
+        "sandbox_object_store_queue_depth",
         "Requests currently holding or waiting for an object store slot.",
-        _mc_queue_depth,
+        _object_queue_depth,
     )
 )
 # 🔴 Exported so the saturation alert can be a ratio instead of a literal.
@@ -826,9 +833,9 @@ METRICS.register(
 # on; with it, "how close are we to refusing object writes" is one expression.
 METRICS.register(
     metrics_lib.Gauge(
-        "sandbox_mc_queue_limit",
+        "sandbox_object_store_queue_limit",
         "Configured ceiling on queued object store requests.",
-        lambda: float(MAX_MC_QUEUE),
+        lambda: float(MAX_OBJECT_QUEUE),
     )
 )
 METRICS.register(
@@ -964,7 +971,7 @@ class ObjectStoreBusy(RuntimeError):
 
 
 class ObjectStoreUnavailable(ObjectStoreBusy):
-    """The endpoint is out of reach: mc cannot start, cannot connect, or times out.
+    """The endpoint is out of reach: the request never got an answer.
 
     Why it hangs under ObjectStoreBusy instead of being a separate type: the caller has to do exactly the same thing -
     wait a while and retry - and `except ObjectStoreBusy` + send_object_store_busy already
@@ -979,23 +986,23 @@ class ObjectStoreUnavailable(ObjectStoreBusy):
 
 
 @contextlib.contextmanager
-def mc_slot() -> Any:
-    """Enter the mc execution gate. When the queue is full, fail immediately instead of waiting.
+def object_slot() -> Any:
+    """Enter the object-operation gate. When the queue is full, fail immediately instead of waiting.
 
     Constraint: the order of the two gates cannot be reversed - take the queue slot first, then the execution slot. The other way round, the thread blocks
          on the execution slot first and the queue slot is useless."""
-    global _MC_INFLIGHT
-    if not _MC_QUEUE_SLOTS.acquire(blocking=False):
+    global _OBJECT_INFLIGHT
+    if not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
         raise ObjectStoreBusy("object storage is busy; retry shortly")
-    with _MC_INFLIGHT_LOCK:
-        _MC_INFLIGHT += 1
+    with _OBJECT_INFLIGHT_LOCK:
+        _OBJECT_INFLIGHT += 1
     try:
-        with _MC_SLOTS:
+        with _OBJECT_SLOTS:
             yield
     finally:
-        with _MC_INFLIGHT_LOCK:
-            _MC_INFLIGHT -= 1
-        _MC_QUEUE_SLOTS.release()
+        with _OBJECT_INFLIGHT_LOCK:
+            _OBJECT_INFLIGHT -= 1
+        _OBJECT_QUEUE_SLOTS.release()
 _RUNTIME_ADMISSION_LOCK = threading.Lock()
 TICKET_LEASE_SELECTOR = "convee.io/purpose=object-ticket"
 
@@ -1541,112 +1548,115 @@ def forwardable_headers(headers: Any, allowed: tuple[str, ...]) -> dict[str, str
     return forwarded
 
 
-def mc_environment() -> dict[str, str]:
+_OBJECT_STORE_CLIENT: Any = None
+_OBJECT_STORE_CLIENT_LOCK = threading.Lock()
+
+
+def object_store() -> Any:
+    """The S3 client, built once.
+
+    This used to shell out to the MinIO Client, which meant writing an alias
+    config file with the credentials in it and forking a Go binary per
+    operation. mc is AGPL-3.0; boto3 is Apache-2.0 and is what the rest of this
+    platform already uses.
+    """
+    global _OBJECT_STORE_CLIENT
+    if _OBJECT_STORE_CLIENT is not None:
+        return _OBJECT_STORE_CLIENT
     if not OBJECT_STORE_ENDPOINT.startswith(("http://", "https://")):
         raise ValueError("object storage endpoint is invalid")
-    env = os.environ.copy()
-    env["MC_CONFIG_DIR"] = "/tmp/mc"
-    env["GOMAXPROCS"] = str(MC_GOMAXPROCS)
-    env["GOMEMLIMIT"] = MC_GOMEMLIMIT
-    env.pop(f"MC_HOST_{MC_ALIAS}", None)
-    config_dir = pathlib.Path(env["MC_CONFIG_DIR"])
-    config_path = config_dir / "config.json"
-    addressing = {
-        "auto": "auto",
-        "virtual": "off",
-        "path": "on",
-    }[OBJECT_STORE_ADDRESSING_STYLE]
-    payload = json.dumps(
-        {
-            "version": "10",
-            "aliases": {
-                MC_ALIAS: {
-                    "url": OBJECT_STORE_ENDPOINT,
-                    "accessKey": OBJECT_STORE_ACCESS_KEY,
-                    "secretKey": OBJECT_STORE_SECRET_KEY,
-                    "api": OBJECT_STORE_SIGNATURE_VERSION,
-                    "path": addressing,
-                }
-            },
-        },
-        indent="\t",
-    )
-    with MC_CONFIG_LOCK:
-        config_dir.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_path = tempfile.mkstemp(
-            dir=config_dir, prefix=".config-", text=True
-        )
-        try:
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                handle.write(payload)
-            os.chmod(temporary_path, 0o600)
-            os.replace(temporary_path, config_path)
-        finally:
-            pathlib.Path(temporary_path).unlink(missing_ok=True)
-    return env
+    with _OBJECT_STORE_CLIENT_LOCK:
+        if _OBJECT_STORE_CLIENT is None:
+            _OBJECT_STORE_CLIENT = boto3.client(
+                "s3",
+                endpoint_url=OBJECT_STORE_ENDPOINT,
+                aws_access_key_id=OBJECT_STORE_ACCESS_KEY,
+                aws_secret_access_key=OBJECT_STORE_SECRET_KEY,
+                config=BotoConfig(
+                    signature_version=(
+                        "s3v4"
+                        if OBJECT_STORE_SIGNATURE_VERSION == "S3V4"
+                        else "s3"
+                    ),
+                    s3={"addressing_style": OBJECT_STORE_ADDRESSING_STYLE},
+                    # One connection per in-flight operation, matched to the
+                    # semaphore rather than left at botocore's default of 10:
+                    # a pool wider than the gate can only hold sockets open.
+                    max_pool_connections=MAX_CONCURRENT_OBJECT_OPS,
+                    connect_timeout=10,
+                    read_timeout=60,
+                    retries={"max_attempts": 1, "mode": "standard"},
+                ),
+            )
+    return _OBJECT_STORE_CLIENT
 
 
-# mc expresses both "endpoint out of reach" and "this key does not exist" as a non-zero exit code; only stderr tells them apart.
-# The criterion is the wording of the network layer (Go's net package + mc's own phrasing), not business errors - the two misjudgment
-# directions cost differently: judging "object does not exist" as an outage makes the caller retry a few times needlessly; judging "the endpoint is down" as
-# a bad request makes the caller rotate its request and credentials when all it should do is wait. So only a few strings that
-# never appear in business errors are recognized here, and everything else stays "this operation was rejected".
-_MC_OUTAGE_MARKERS = (
-    "connection refused",
-    "no such host",
-    "i/o timeout",
-    "context deadline exceeded",
-    "connection reset by peer",
-    "network is unreachable",
-    "no route to host",
-    # MinIO Server's phrasing, and the S3 endpoint this repository deploys is
-    # Ceph RGW, which never emits it. RGW answering 503 while the cluster is
-    # degraded therefore lands in "this operation was rejected" - the expensive
-    # misjudgment direction named above. Adding a marker for it needs mc's
-    # actual stderr for an RGW 503 captured from a real cluster; guessing the
-    # wording would only replace one string that never fires with another.
-    "server not initialized",
-    "unable to initialize new alias",
+# The store expresses both "endpoint out of reach" and "this key does not exist" as an
+# exception; the two misjudgment directions cost differently. Judging "object does not
+# exist" as an outage makes the caller retry a few times needlessly; judging "the endpoint
+# is down" as a bad request makes the caller rotate its request and credentials when all it
+# should do is wait.
+#
+# This used to substring-match mc's stderr, and the comment that stood here admitted the
+# gap: RGW answering 503 while the cluster is degraded produced wording nobody had captured,
+# so it landed in "rejected" - the expensive direction. botocore reports the status code, so
+# a 5xx is now classified from the response rather than from prose.
+_OUTAGE_STATUS = frozenset({500, 502, 503, 504})
+#: Transport failures: the request never got an answer. Named rather than
+#: inlined so a test can assert every one of them has a sample -- a branch
+#: nobody ever fed a matching value to is indistinguishable from one that
+#: cannot match anything.
+_OUTAGE_EXCEPTIONS = (
+    EndpointConnectionError,
+    ConnectTimeoutError,
+    ReadTimeoutError,
+    ConnectionClosedError,
 )
 
 
-def mc_failure_is_outage(stderr: bytes) -> bool:
-    """Whether this non-zero exit means "the storage is out of reach" or "this operation was rejected".
+def failure_is_outage(error: BaseException) -> bool:
+    """Whether this failure means "the storage is out of reach" or "this operation was rejected".
 
     Responsibility: classification only; no retries, no probing.
-    Constraint: reads stderr for substring matching only and **does not return its contents to the caller** - that is external text
-         and contains the endpoint address and bucket names."""
-    text = stderr.decode("utf-8", "replace").lower()
-    return any(marker in text for marker in _MC_OUTAGE_MARKERS)
+    Constraint: **the store's own message never reaches the caller** - it is external
+         text and carries the endpoint address and bucket names."""
+    if isinstance(error, ClientError):
+        status = (
+            error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        )
+        return status in _OUTAGE_STATUS
+    return isinstance(error, _OUTAGE_EXCEPTIONS)
 
 
-def _object_operation(args: tuple[str, ...]) -> str:
-    return {
-        "pipe": "write",
-        "cat": "read",
-        "rm": "delete",
-        "ls": "list",
-        "stat": "metadata",
-    }.get(args[0] if args else "", "other")
+def _translate(error: BaseException) -> BaseException:
+    if failure_is_outage(error):
+        return ObjectStoreUnavailable(
+            "object storage is unreachable; retry shortly"
+        )
+    return RuntimeError("object storage rejected the operation")
 
 
-def run_mc(
-    *args: str,
-    input_bytes: bytes | None = None,
-    max_output_bytes: int = MAX_OBJECT_BYTES + 65_536,
-) -> bytes:
-    operation = _object_operation(args)
+def object_call(operation: str, action: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run one object-store call inside the gate, with tracing and metrics.
+
+    `operation` is the coarse verb the metric is labelled with - the same set
+    the mc argv used to be mapped to, so the series is continuous across this
+    change.
+    """
     with tracing.start_span(
         "object_store.operation",
         kind=3,
         attributes={"sandbox.object_store.operation": operation},
     ):
         try:
-            result = _run_mc(
-                *args,
-                input_bytes=input_bytes,
-                max_output_bytes=max_output_bytes,
-            )
+            with object_slot():
+                result = action(*args, **kwargs)
+        except (ObjectStoreBusy, ObjectStoreUnavailable):
+            OBJECT_STORE_OPERATIONS.inc(operation=operation, outcome="error")
+            raise
+        except (ClientError, BotoCoreError, OSError) as error:
+            OBJECT_STORE_OPERATIONS.inc(operation=operation, outcome="error")
+            raise _translate(error) from error
         except Exception:
             OBJECT_STORE_OPERATIONS.inc(operation=operation, outcome="error")
             raise
@@ -1654,74 +1664,187 @@ def run_mc(
         return result
 
 
-def _run_mc(
-    *args: str,
-    input_bytes: bytes | None = None,
-    max_output_bytes: int = MAX_OBJECT_BYTES + 65_536,
-) -> bytes:
-    try:
-        with mc_slot():
-            result = subprocess.run(
-                [OBJECT_STORE_CLIENT, *args],
-                input=input_bytes,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=60,
-                check=False,
-                env=mc_environment(),
-            )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ObjectStoreUnavailable(
-            "object storage is unreachable; retry shortly"
-        ) from exc
-    if result.returncode != 0:
-        if mc_failure_is_outage(result.stderr):
-            raise ObjectStoreUnavailable(
-                "object storage is unreachable; retry shortly"
-            )
-        raise RuntimeError("object storage rejected the operation")
-    if len(result.stdout) > max_output_bytes:
-        raise ValueError("object storage response is too large")
-    return result.stdout
+def object_put(
+    bucket: str,
+    key: str,
+    body: Any,
+    *,
+    content_type: str | None = None,
+    metadata: dict[str, str] | None = None,
+) -> None:
+    extra: dict[str, Any] = {}
+    if content_type is not None:
+        extra["ContentType"] = content_type
+    if metadata:
+        extra["Metadata"] = metadata
+    object_call(
+        "write",
+        object_store().put_object,
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        **extra,
+    )
 
 
-def run_mc_file(*args: str, input_file: Any) -> None:
-    operation = _object_operation(args)
+def object_get(bucket: str, key: str, max_bytes: int) -> bytes:
+    def read() -> bytes:
+        response = object_store().get_object(Bucket=bucket, Key=key)
+        with response["Body"] as stream:
+            # One byte past the ceiling, so "exactly at the limit" and "over it"
+            # stay distinguishable at the call site.
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("object storage response is too large")
+        return data
+
+    return object_call("read", read)
+
+
+def object_list(bucket: str, prefix: str) -> list[dict[str, Any]]:
+    def listing() -> list[dict[str, Any]]:
+        paginator = object_store().get_paginator("list_objects_v2")
+        items: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+            for item in page.get("Contents") or []:
+                items.append(
+                    {
+                        "key": item["Key"],
+                        "bytes": int(item.get("Size") or 0),
+                        "last_modified": _timestamp(item.get("LastModified")),
+                    }
+                )
+        return items
+
+    return object_call("list", listing)
+
+
+def object_versions(bucket: str, key: str) -> list[dict[str, Any]]:
+    """Every version and delete marker of one key, newest first.
+
+    `version_ordinal` has no S3 equivalent -- it was mc's own numbering, and it
+    is kept because it is part of the response shape. It is derived from
+    modification time so the invariant it exists for, highest ordinal is the
+    current version, still holds. `is_latest` comes from the store rather than
+    from the ordinal: S3 reports it, and deriving it here would be a second
+    opinion that can disagree with the first.
+    """
+    def listing() -> list[dict[str, Any]]:
+        paginator = object_store().get_paginator("list_object_versions")
+        rows: list[dict[str, Any]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=key):
+            for item in page.get("Versions") or []:
+                if item.get("Key") != key:
+                    continue
+                rows.append(_version_row(item, delete_marker=False))
+            for item in page.get("DeleteMarkers") or []:
+                if item.get("Key") != key:
+                    continue
+                rows.append(_version_row(item, delete_marker=True))
+        # Oldest first while numbering. A row with no timestamp sorts before
+        # every dated one rather than raising: datetime and None are not
+        # comparable, and one undated row would otherwise take out the listing.
+        dated = [row for row in rows if row["_sort_key"] is not None]
+        undated = [row for row in rows if row["_sort_key"] is None]
+        dated.sort(key=lambda row: row["_sort_key"])
+        ordered = undated + dated
+        for position, row in enumerate(ordered, start=1):
+            row["version_ordinal"] = position
+            row.pop("_sort_key", None)
+        ordered.reverse()
+        return ordered
+
+    return object_call("list", listing)
+
+
+@contextlib.contextmanager
+def object_stream(bucket: str, key: str) -> Any:
+    """Hold the gate and yield the object body for streaming to a client.
+
+    Separate from object_get because the caller writes the bytes out as they
+    arrive rather than buffering the whole object: this is the path a download
+    ticket takes, and the size limit is the ticket's, checked before the body
+    is opened.
+    """
     with tracing.start_span(
         "object_store.operation",
         kind=3,
-        attributes={"sandbox.object_store.operation": operation},
+        attributes={"sandbox.object_store.operation": "read"},
     ):
-        try:
-            _run_mc_file(*args, input_file=input_file)
-        except Exception:
-            OBJECT_STORE_OPERATIONS.inc(operation=operation, outcome="error")
-            raise
-        OBJECT_STORE_OPERATIONS.inc(operation=operation, outcome="success")
+        with object_slot():
+            try:
+                response = object_store().get_object(Bucket=bucket, Key=key)
+            except (ClientError, BotoCoreError, OSError) as error:
+                OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
+                raise _translate(error) from error
+            try:
+                with response["Body"] as body:
+                    yield body
+            except (ClientError, BotoCoreError, OSError) as error:
+                OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
+                raise _translate(error) from error
+            except Exception:
+                OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="error")
+                raise
+            OBJECT_STORE_OPERATIONS.inc(operation="read", outcome="success")
 
 
-def _run_mc_file(*args: str, input_file: Any) -> None:
-    try:
-        with mc_slot():
-            result = subprocess.run(
-                [OBJECT_STORE_CLIENT, *args],
-                stdin=input_file,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=180,
-                check=False,
-                env=mc_environment(),
+def object_head(bucket: str, key: str) -> dict[str, Any]:
+    return object_call("metadata", object_store().head_object, Bucket=bucket, Key=key)
+
+
+def object_delete(bucket: str, key: str) -> None:
+    object_call("delete", object_store().delete_object, Bucket=bucket, Key=key)
+
+
+def object_delete_versions(bucket: str, key: str) -> None:
+    """Delete the object and every version and delete marker it has.
+
+    `mc rm --versions --force` in one call; there is no single S3 verb for it.
+    """
+    def purge() -> None:
+        store = object_store()
+        paginator = store.get_paginator("list_object_versions")
+        targets: list[dict[str, str]] = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=key):
+            for group in ("Versions", "DeleteMarkers"):
+                for item in page.get(group) or []:
+                    if item.get("Key") != key:
+                        continue
+                    targets.append(
+                        {"Key": item["Key"], "VersionId": item["VersionId"]}
+                    )
+        if not targets:
+            store.delete_object(Bucket=bucket, Key=key)
+            return
+        for start in range(0, len(targets), 1000):
+            store.delete_objects(
+                Bucket=bucket,
+                Delete={"Objects": targets[start:start + 1000], "Quiet": True},
             )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ObjectStoreUnavailable(
-            "object storage is unreachable; retry shortly"
-        ) from exc
-    if result.returncode != 0:
-        if mc_failure_is_outage(result.stderr):
-            raise ObjectStoreUnavailable(
-                "object storage is unreachable; retry shortly"
-            )
-        raise RuntimeError("object storage rejected the operation")
+
+    object_call("delete", purge)
+
+
+def _timestamp(value: Any) -> str | None:
+    """The listing timestamp, as the string the mc-shaped responses carried."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
+def _version_row(item: dict[str, Any], *, delete_marker: bool) -> dict[str, Any]:
+    return {
+        "version_id": item.get("VersionId"),
+        "is_latest": bool(item.get("IsLatest")),
+        "delete_marker": delete_marker,
+        "bytes": int(item.get("Size") or 0),
+        "last_modified": _timestamp(item.get("LastModified")),
+        "etag": item.get("ETag"),
+        "_sort_key": item.get("LastModified"),
+    }
 
 
 def validate_object_id(raw_value: object, field: str) -> str:
@@ -1734,8 +1857,8 @@ def validate_object_id(raw_value: object, field: str) -> str:
 def validate_object_owner(raw_value: object) -> str:
     """Validate the ``<tenant>/<subject>`` partition every object key carries.
 
-    This is the only guard between a caller-supplied string and the key handed
-    to ``mc``.  A leading alphanumeric already makes a dot-only segment
+    This is the only guard between a caller-supplied string and the key sent
+    to the store.  A leading alphanumeric already makes a dot-only segment
     impossible, but ``users/../../x`` escapes its prefix the moment any layer
     normalizes the path, so that case is also rejected explicitly rather than
     resting on one character class staying the way it is.
@@ -1859,7 +1982,7 @@ def put_object(payload: dict) -> dict:
         str(expected_digest), digest
     ):
         raise ValueError("sha256 does not match content")
-    run_mc("pipe", f"{MC_ALIAS}/{bucket}/{key}", input_bytes=data)
+    object_put(bucket, key, data)
     return {
         "scope": payload["scope"],
         "bucket": bucket,
@@ -1896,7 +2019,7 @@ def put_object_bytes(
     ) as handle:
         handle.write(data)
         handle.seek(0)
-        run_mc_file("pipe", f"{MC_ALIAS}/{bucket}/{key}", input_file=handle)
+        object_put(bucket, key, handle)
     return {
         "scope": payload["scope"],
         "bucket": bucket,
@@ -1908,7 +2031,7 @@ def put_object_bytes(
 
 def get_object(query: dict) -> dict:
     bucket, key = object_location(query)
-    data = run_mc("cat", f"{MC_ALIAS}/{bucket}/{key}")
+    data = object_get(bucket, key, MAX_OBJECT_BYTES)
     if len(data) > MAX_OBJECT_BYTES:
         raise ValueError("object is too large")
     return {
@@ -1923,30 +2046,7 @@ def get_object(query: dict) -> dict:
 
 def list_objects(query: dict) -> dict:
     bucket, prefix = object_location(query, allow_prefix=True)
-    output = run_mc(
-        "ls",
-        "--recursive",
-        "--json",
-        f"{MC_ALIAS}/{bucket}/{prefix}",
-        max_output_bytes=2 * 1024 * 1024,
-    )
-    objects = []
-    for raw_line in output.splitlines():
-        if not raw_line:
-            continue
-        try:
-            item = json.loads(raw_line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "object storage returned invalid listing data"
-            ) from exc
-        objects.append(
-            {
-                "key": str(item.get("key") or item.get("name") or ""),
-                "bytes": int(item.get("size") or 0),
-                "last_modified": item.get("lastModified"),
-            }
-        )
+    objects = object_list(bucket, prefix)
     return {"scope": query["scope"], "bucket": bucket, "objects": objects}
 
 
@@ -1970,64 +2070,33 @@ def stat_object(query: dict) -> dict:
 
 
 def object_stat(bucket: str, key: str) -> dict:
-    output = run_mc(
-        "stat",
-        "--json",
-        f"{MC_ALIAS}/{bucket}/{key}",
-        max_output_bytes=65_536,
-    )
-    try:
-        item = json.loads(output)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "object storage returned invalid metadata"
-        ) from exc
-    if not isinstance(item, dict):
-        raise RuntimeError("object storage returned invalid metadata")
-    return item
+    """HEAD, shaped the way the mc `stat --json` output was consumed.
+
+    The keys stay as they were so stat_object below is unchanged; the values
+    now come from response fields instead of parsed JSON text.
+    """
+    head = object_head(bucket, key)
+    return {
+        "size": int(head.get("ContentLength") or 0),
+        "etag": head.get("ETag"),
+        "lastModified": _timestamp(head.get("LastModified")),
+        "versionID": head.get("VersionId"),
+        "metadata": {
+            "Content-Type": head.get(
+                "ContentType", "application/octet-stream"
+            ),
+            # S3 returns user metadata lower-cased and without the header
+            # prefix; mc surfaced the header name. Both spellings are accepted
+            # so a checkpoint written before this change still reads back.
+            "X-Amz-Meta-Sha256": (head.get("Metadata") or {}).get("sha256")
+            or (head.get("Metadata") or {}).get("Sha256"),
+        },
+    }
 
 
 def list_object_versions(query: dict) -> dict:
     bucket, key = object_location(query)
-    output = run_mc(
-        "ls",
-        "--versions",
-        "--json",
-        f"{MC_ALIAS}/{bucket}/{key}",
-        max_output_bytes=2 * 1024 * 1024,
-    )
-    versions = []
-    for raw_line in output.splitlines():
-        if not raw_line:
-            continue
-        try:
-            item = json.loads(raw_line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "object storage returned invalid version data"
-            ) from exc
-        versions.append(
-            {
-                "version_id": item.get("versionId") or item.get("versionID"),
-                "version_ordinal": int(item.get("versionOrdinal") or 0),
-                "is_latest": bool(item.get("isLatest")),
-                "delete_marker": bool(
-                    item.get("isDeleteMarker") or item.get("deleteMarker")
-                ),
-                "bytes": int(item.get("size") or 0),
-                "last_modified": item.get("lastModified"),
-                "etag": item.get("etag"),
-            }
-        )
-    latest_ordinal = max(
-        (version["version_ordinal"] for version in versions),
-        default=0,
-    )
-    if latest_ordinal:
-        for version in versions:
-            version["is_latest"] = (
-                version["version_ordinal"] == latest_ordinal
-            )
+    versions = object_versions(bucket, key)
     return {
         "scope": query["scope"],
         "bucket": bucket,
@@ -2042,14 +2111,9 @@ def delete_object(query: dict) -> dict:
         "1", "true", "yes",
     }
     if purge_versions:
-        run_mc(
-            "rm",
-            "--versions",
-            "--force",
-            f"{MC_ALIAS}/{bucket}/{key}",
-        )
+        object_delete_versions(bucket, key)
     else:
-        run_mc("rm", f"{MC_ALIAS}/{bucket}/{key}")
+        object_delete(bucket, key)
     return {
         "scope": query["scope"],
         "bucket": bucket,
@@ -2420,12 +2484,12 @@ def checkpoint_workspace(workspace_id: str) -> dict[str, Any]:
     ) as handle:
         handle.write(archive)
         handle.seek(0)
-        run_mc_file(
-            "pipe",
-            "--attr",
-            f"Content-Type=application/gzip;X-Amz-Meta-Sha256={digest}",
-            f"{MC_ALIAS}/{OBJECT_STORE_WORKSPACE_BUCKET}/{key}",
-            input_file=handle,
+        object_put(
+            OBJECT_STORE_WORKSPACE_BUCKET,
+            key,
+            handle,
+            content_type="application/gzip",
+            metadata={"Sha256": digest},
         )
     return {
         "checkpoint_id": checkpoint_id,
@@ -2447,10 +2511,8 @@ def restore_workspace_checkpoint(
         raise ValueError("invalid workspace_id")
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"workspaces/{workspace_id}/checkpoints/{checkpoint_id}.tar.gz"
-    archive = run_mc(
-        "cat",
-        f"{MC_ALIAS}/{OBJECT_STORE_WORKSPACE_BUCKET}/{key}",
-        max_output_bytes=MAX_STREAM_OBJECT_BYTES + 1,
+    archive = object_get(
+        OBJECT_STORE_WORKSPACE_BUCKET, key, MAX_STREAM_OBJECT_BYTES
     )
     digest = hashlib.sha256(archive).hexdigest()
     if expected_sha256 and not hmac.compare_digest(expected_sha256, digest):
@@ -2492,17 +2554,11 @@ def _checkpoint_prefix(workspace_id: str) -> str:
     return f"workspaces/{workspace_id}/checkpoints/"
 
 
-def _parse_checkpoint_items(output: bytes, prefix: str) -> list[dict[str, Any]]:
+def _parse_checkpoint_items(
+    listed: list[dict[str, Any]], prefix: str
+) -> list[dict[str, Any]]:
     checkpoints: list[dict[str, Any]] = []
-    for raw_line in output.splitlines():
-        if not raw_line:
-            continue
-        try:
-            item = json.loads(raw_line)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                "object storage returned invalid checkpoint data"
-            ) from exc
+    for item in listed:
         listed_key = str(item.get("key") or "")
         key = (
             listed_key
@@ -2521,24 +2577,18 @@ def _parse_checkpoint_items(output: bytes, prefix: str) -> list[dict[str, Any]]:
         checkpoints.append({
             "checkpoint_id": checkpoint_id,
             "key": key,
-            "bytes": int(item.get("size") or 0),
-            "last_modified": item.get("lastModified"),
+            "bytes": int(item.get("bytes") or 0),
+            "last_modified": item.get("last_modified"),
         })
     return checkpoints
 
 
 def list_workspace_checkpoints(workspace_id: str) -> dict[str, Any]:
     prefix = _checkpoint_prefix(workspace_id)
-    output = run_mc(
-        "ls",
-        "--recursive",
-        "--json",
-        f"{MC_ALIAS}/{OBJECT_STORE_WORKSPACE_BUCKET}/{prefix}",
-        max_output_bytes=2 * 1024 * 1024,
-    )
+    listed = object_list(OBJECT_STORE_WORKSPACE_BUCKET, prefix)
     return {
         "workspace_id": workspace_id,
-        "checkpoints": _parse_checkpoint_items(output, prefix),
+        "checkpoints": _parse_checkpoint_items(listed, prefix),
     }
 
 
@@ -2549,16 +2599,15 @@ def delete_workspace_checkpoint(
     prefix = _checkpoint_prefix(workspace_id)
     checkpoint_id = validate_object_id(checkpoint_id, "checkpoint_id")
     key = f"{prefix}{checkpoint_id}.tar.gz"
-    target = f"{MC_ALIAS}/{OBJECT_STORE_WORKSPACE_BUCKET}/{key}"
     try:
-        run_mc("rm", "--versions", "--force", target)
+        object_delete_versions(OBJECT_STORE_WORKSPACE_BUCKET, key)
     except RuntimeError:
         # S3-compatible stores are not required to implement object
         # versioning. Aliyun OSS in compatibility mode rejects versioned
         # operations with a bucket-ownership error while a plain delete
         # succeeds; without this fallback every workspace purge on such a
         # store fails and leaks the ownership quota row forever.
-        run_mc("rm", "--force", target)
+        object_delete(OBJECT_STORE_WORKSPACE_BUCKET, key)
     return {
         "workspace_id": workspace_id,
         "checkpoint_id": checkpoint_id,

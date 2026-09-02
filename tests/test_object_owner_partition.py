@@ -7,7 +7,7 @@ goes. ``test_object_owner_derivation.py`` covers the route layer deciding *who*
 the owner is. Nothing covered the layer underneath: ``validate_object_owner``,
 ``validate_object_path``, ``object_location``, ``object_key_owner``,
 ``bind_object_owner``, ``issue_object_ticket``, ``verify_object_ticket`` and
-``mc_slot`` all had zero callers in this suite.
+``object_slot`` all had zero callers in this suite.
 
 That layer is the last thing between a caller-supplied string and the key
 handed to ``mc``, which is why it is tested directly here rather than only
@@ -375,11 +375,11 @@ class ObjectTicketTests(unittest.TestCase):
                 self.assertIsNone(core.verify_object_ticket(token, "upload"))
 
 
-class McQueueDepthTests(unittest.TestCase):
+class ObjectQueueDepthTests(unittest.TestCase):
     """Two gates, and the queue one is what keeps threads from piling up.
 
-    ``_MC_SLOTS`` bounds the resident memory of mc child processes;
-    ``_MC_QUEUE_SLOTS`` bounds the *request threads* waiting in front of it.
+    ``_OBJECT_SLOTS`` bounds the object work in flight and the memory it holds;
+    ``_OBJECT_QUEUE_SLOTS`` bounds the *request threads* waiting in front of it.
     Without the second, concurrent object operations grow the thread count
     without limit until the 1GiB cgroup kills the Control Plane -- and the
     reaper is a daemon thread in that process, so sandboxes stop being
@@ -393,10 +393,10 @@ class McQueueDepthTests(unittest.TestCase):
     def gates(self, depth: int):
         return (
             mock.patch.object(
-                core, "_MC_QUEUE_SLOTS", threading.BoundedSemaphore(depth)
+                core, "_OBJECT_QUEUE_SLOTS", threading.BoundedSemaphore(depth)
             ),
             mock.patch.object(
-                core, "_MC_SLOTS", threading.BoundedSemaphore(depth + 8)
+                core, "_OBJECT_SLOTS", threading.BoundedSemaphore(depth + 8)
             ),
         )
 
@@ -407,12 +407,12 @@ class McQueueDepthTests(unittest.TestCase):
             held = []
             try:
                 for _ in range(depth):
-                    slot = core.mc_slot()
+                    slot = core.object_slot()
                     slot.__enter__()
                     held.append(slot)
                 began = time.monotonic()
                 with self.assertRaises(core.ObjectStoreBusy):
-                    with core.mc_slot():
+                    with core.object_slot():
                         self.fail("admitted while the queue was full")
                 # Fail *fast* is the point: the gate exists so a request thread
                 # does not sit here holding its stack while the next hundred
@@ -431,11 +431,11 @@ class McQueueDepthTests(unittest.TestCase):
         # Without release, one burst wedges the Control Plane permanently.
         queue_gate, exec_gate = self.gates(1)
         with queue_gate, exec_gate:
-            with core.mc_slot():
+            with core.object_slot():
                 with self.assertRaises(core.ObjectStoreBusy):
-                    with core.mc_slot():
+                    with core.object_slot():
                         pass
-            with core.mc_slot():
+            with core.object_slot():
                 pass
 
     def test_busy_is_a_runtime_error_subclass(self) -> None:

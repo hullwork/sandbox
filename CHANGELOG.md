@@ -6,6 +6,20 @@ Versioning after its first public release.
 
 ## Unreleased
 
+### Changed
+
+- Control Plane speaks S3 through `boto3` (Apache-2.0) instead of running the MinIO
+  Client as a subprocess. `mc` is AGPL-3.0 and was the only strong-copyleft component
+  in any image built here; the notices entry and the README's "known limitations"
+  section both said so, and both are now records rather than warnings.
+  Failure classification improves as a side effect: it read `mc`'s stderr and matched
+  substrings, which is why a Ceph RGW 503 -- a real outage, and the expensive one to
+  misjudge -- landed in "the request was rejected". botocore reports the status code.
+  `SANDBOX_MAX_CONCURRENT_MC` is now `SANDBOX_MAX_CONCURRENT_OBJECT_OPS`,
+  `SANDBOX_MAX_MC_QUEUE` is `SANDBOX_MAX_OBJECT_QUEUE`, `OBJECT_STORE_CLIENT` and the
+  two Go runtime knobs are gone, and the `sandbox_mc_queue_*` metrics are
+  `sandbox_object_store_queue_*` (dashboard and alert rule updated with them).
+
 ### Security
 
 - Control Plane signs browser identity in through the deployment's own OpenID Connect

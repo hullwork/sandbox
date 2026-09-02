@@ -28,7 +28,6 @@ from urllib.parse import parse_qs, urlparse
 import re
 import secrets
 import select
-import subprocess
 import tempfile
 import time
 
@@ -1609,17 +1608,12 @@ class ApiHandler(BaseHTTPRequestHandler):
             ):
                 raise ValueError("sha256 does not match content")
             upload.seek(0)
-            content_type = str(claims["content_type"])
-            attributes = (
-                f"Content-Type={content_type};"
-                f"X-Amz-Meta-Sha256={actual_digest}"
-            )
-            control_plane.run_mc_file(
-                "pipe",
-                "--attr",
-                attributes,
-                f"{control_plane.MC_ALIAS}/{claims['bucket']}/{claims['key']}",
-                input_file=upload,
+            control_plane.object_put(
+                str(claims["bucket"]),
+                str(claims["key"]),
+                upload,
+                content_type=str(claims["content_type"]),
+                metadata={"Sha256": actual_digest},
             )
         self.send_json(
             HTTPStatus.CREATED,
@@ -1641,24 +1635,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise ValueError("object exceeds ticket size limit")
         metadata = item.get("metadata") or {}
         expected_digest = str(metadata.get("X-Amz-Meta-Sha256") or "")
-        process: subprocess.Popen[bytes] | None = None
-        with tempfile.SpooledTemporaryFile(
-            max_size=64 * 1024,
-            mode="w+b",
-            dir="/tmp",
-        ) as errors, control_plane.mc_slot():
+        with control_plane.object_stream(bucket, key) as body:
             try:
-                process = subprocess.Popen(
-                    [
-                        control_plane.OBJECT_STORE_CLIENT,
-                        "cat",
-                        f"{control_plane.MC_ALIAS}/{bucket}/{key}",
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=errors,
-                    env=control_plane.mc_environment(),
-                )
-                assert process.stdout is not None
                 self.send_response(HTTPStatus.OK)
                 self.send_header(
                     "Content-Type",
@@ -1680,18 +1658,20 @@ class ApiHandler(BaseHTTPRequestHandler):
                 remaining = size
                 digest = hashlib.sha256()
                 while remaining:
-                    chunk = process.stdout.read(min(1024 * 1024, remaining))
+                    chunk = body.read(min(1024 * 1024, remaining))
                     if not chunk:
                         break
                     self.wfile.write(chunk)
                     self.wfile.flush()
                     digest.update(chunk)
                     remaining -= len(chunk)
-                extra = process.stdout.read(1)
-                returncode = process.wait(timeout=60)
+                # A body longer than the HEAD said means the object changed
+                # under the ticket; short means it was truncated. Both are the
+                # same failure as before: the promised Content-Length was not
+                # what got written.
+                extra = body.read(1)
                 if (
-                    returncode != 0
-                    or remaining
+                    remaining
                     or extra
                     or (
                         expected_digest
@@ -1707,14 +1687,6 @@ class ApiHandler(BaseHTTPRequestHandler):
                     )
             except (BrokenPipeError, ConnectionResetError):
                 self.close_connection = True
-            finally:
-                if process is not None and process.poll() is None:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
 
     @staticmethod
     def match_path(pattern: str, path: str) -> re.Match[str] | None:

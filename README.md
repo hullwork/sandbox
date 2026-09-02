@@ -49,7 +49,7 @@ operation fails; it never falls back to running on the host.
 ```bash
 python3 -m venv .venv                  # a system-wide install is an error on Debian,
 .venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
-make test                      # 665 unit and contract tests, no network, no cluster
+make test                      # 670 unit and contract tests, no network, no cluster
 make help                      # every Make target with its one-line description
 ```
 
@@ -303,16 +303,6 @@ model, assets, and threat list are in [docs/SECURITY_MODEL.md](docs/SECURITY_MOD
 
 These are real and currently unfixed. A README that hides them wastes your time later.
 
-**AGPL-licensed `mc` is a runtime dependency of the Control Plane image.** Every
-object-store operation — checkpoints, imports, exports, tickets, garbage collection —
-runs through a `/usr/local/bin/mc` subprocess. There is no S3 SDK in the code path.
-The image ships the AGPL-3.0 text, a `SOURCE` file naming the upstream commit and the
-tarball SHA-256, and a copy of the applied patch, which together satisfy the source
-obligation — but **anyone redistributing that image conveys a modified AGPL-3.0 work**
-and inherits those obligations. Read [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-before publishing a derivative image. Note that replacing MinIO Server with Ceph RGW
-changed the *server* side only; the client is still `mc`.
-
 **`overlays/eks` cannot pull images as shipped.** It patches EFS storage onto the base
 and nothing else, so the five `imagePullPolicy: Never` settings in `k8s/` survive into
 the rendered EKS output. Those exist because the local profile side-loads images into
@@ -381,8 +371,8 @@ HIGH/CRITICAL.
 - Decision ownership: [GOVERNANCE.md](GOVERNANCE.md) and [MAINTAINERS.md](MAINTAINERS.md)
 - Community expectations: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
-The repository source is released under the [MIT License](LICENSE). The Control Plane
-**image** additionally bundles a patched build of MinIO Client (`mc`, AGPL-3.0) as a
-runtime dependency; distributors of that image must satisfy the obligations described
-in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). `mc` is used purely as an S3
-protocol client — Sandbox Platform does not deploy MinIO Server.
+The repository source is released under the [MIT License](LICENSE), and as of
+2026-09-02 no image built from it carries a strong-copyleft component: the Control
+Plane used to bundle a patched MinIO Client (`mc`, AGPL-3.0) and now talks S3 through
+`boto3` (Apache-2.0). Third-party components and the obligations that still attach to
+images built from earlier revisions are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

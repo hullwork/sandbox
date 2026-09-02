@@ -744,7 +744,7 @@ def main() -> None:
 
         unicode_object = "source/中文 空格/对象.json"
         object_paths.append(unicode_object)
-        object_data = "MinIO 中文对象 🪣\n".encode("utf-8")
+        object_data = "S3 中文对象 🪣\n".encode("utf-8")
         status, body = api(
             "POST",
             "/v1/storage/objects",
@@ -775,7 +775,7 @@ def main() -> None:
         concurrent_objects = [f"source/concurrent/object-{index}.txt" for index in range(8)]
         object_paths.extend(concurrent_objects)
 
-        def put_minio(path: str) -> tuple[int, Any]:
+        def put_object(path: str) -> tuple[int, Any]:
             return api(
                 "POST",
                 "/v1/storage/objects",
@@ -790,8 +790,8 @@ def main() -> None:
             )
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            minio_writes = list(executor.map(put_minio, concurrent_objects))
-        assert all(status == 201 for status, _ in minio_writes), minio_writes
+            object_writes = list(executor.map(put_object, concurrent_objects))
+        assert all(status == 201 for status, _ in object_writes), object_writes
         status, body = api(
             "GET",
             "/v1/storage/objects/list",
@@ -868,7 +868,7 @@ def main() -> None:
             token=ticket["access_token"],
         )
         expect(status, 401, body)
-        results["minio"] = {
+        results["object_store"] = {
             "unicode_object": True,
             "concurrent_objects": len(concurrent_objects),
             "operation_bound_ticket": 401,

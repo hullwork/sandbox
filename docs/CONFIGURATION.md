@@ -138,12 +138,12 @@ attributed to a person, so:
 | `SANDBOX_WORKSPACE_QUOTA` | `1Gi` | Requested PVC size in optional per-workspace mode |
 | `SANDBOX_PENDING_STALE_SECONDS` | `600` | Age after which a `pending` Runtime admission record is treated as abandoned and its slot released; keep well above the Runtime creation budget |
 | `SANDBOX_ACTIVITY_PROBE_TIMEOUT` | `2` | Seconds allowed for the Runtime activity check that runs before an idle Runtime is evicted |
-| `SANDBOX_MAX_MC_QUEUE` | `32` | Requests allowed to wait for the object-store client slot; beyond it Control Plane answers `503` at once |
+| `SANDBOX_MAX_OBJECT_QUEUE` | `32` | Requests allowed to wait for the object-store slot; beyond it Control Plane answers `503` at once |
+| `SANDBOX_MAX_CONCURRENT_OBJECT_OPS` | `1` | Object-store operations in flight at once; each holds its body in memory, and the boto3 connection pool is sized to match |
 | `SANDBOX_STORE_GAUGE_TTL_SECONDS` | `10` | Cache lifetime of the store-backed `/metrics` gauges, so scrapes do not each query the database |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, seconds `/readyz` reports `503` before listening stops, so Endpoints drop the Pod first |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_INFLIGHT_SECONDS` | `120` | Seconds to wait for in-flight requests and background Runtime creation after listening stops |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_REAPER_SECONDS` | `60` | Seconds to wait for the reaper to finish its current round; the sum of the three shutdown values must stay below `terminationGracePeriodSeconds` |
-| `OBJECT_STORE_CLIENT` | `/usr/local/bin/mc` | Path of the MinIO Client binary used for object-store operations (any S3-compatible endpoint) |
 | `OBJECT_STORE_SIGNATURE_VERSION` | `S3v4` | Request signing version, `S3v2` or `S3v4` |
 | `OBJECT_STORE_ADDRESSING_STYLE` | `auto` | Bucket addressing, `auto`, `virtual`, or `path` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | empty | Optional full OTLP/HTTP JSON `/v1/traces` endpoint; empty disables span export without affecting serving |

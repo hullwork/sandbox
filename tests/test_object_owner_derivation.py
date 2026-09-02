@@ -101,15 +101,47 @@ PROBE = textwrap.dedent(
     # inference from a status code.
     MC_CALLS = []
 
-    def fake_run_mc(*args, input_bytes=None, max_output_bytes=0):
-        MC_CALLS.append(list(args))
-        if args[0] == "ls":
-            return b""
-        if args[0] == "stat":
-            return json.dumps({"size": 2, "etag": "e", "metadata": {}}).encode()
-        return b"hi"
+    class FakeBody:
+        def __init__(self, data):
+            self._data = data
+        def __enter__(self):
+            return self
+        def __exit__(self, *exc):
+            return False
+        def read(self, size=-1):
+            if size is None or size < 0:
+                data, self._data = self._data, b""
+                return data
+            data, self._data = self._data[:size], self._data[size:]
+            return data
 
-    control_plane.run_mc = fake_run_mc
+    class FakePaginator:
+        def __init__(self, pages):
+            self._pages = pages
+        def paginate(self, **kwargs):
+            MC_CALLS.append(["list", kwargs.get("Bucket", ""), kwargs.get("Prefix", "")])
+            return self._pages
+
+    class FakeStore:
+        def put_object(self, **kwargs):
+            MC_CALLS.append(["write", kwargs["Bucket"], kwargs["Key"]])
+            return {}
+        def get_object(self, **kwargs):
+            MC_CALLS.append(["read", kwargs["Bucket"], kwargs["Key"]])
+            return {"Body": FakeBody(b"hi")}
+        def head_object(self, **kwargs):
+            MC_CALLS.append(["metadata", kwargs["Bucket"], kwargs["Key"]])
+            return {"ContentLength": 2, "ETag": "e", "Metadata": {}}
+        def delete_object(self, **kwargs):
+            MC_CALLS.append(["delete", kwargs["Bucket"], kwargs["Key"]])
+            return {}
+        def delete_objects(self, **kwargs):
+            MC_CALLS.append(["delete", kwargs["Bucket"], ""])
+            return {}
+        def get_paginator(self, name):
+            return FakePaginator([{}])
+
+    control_plane.object_store = lambda: FakeStore()
 
     def fake_volume(method, path, payload=None, query=None, timeout=40):
         if method == "GET" and path == "/v1/workspaces":
@@ -247,7 +279,7 @@ PROBE = textwrap.dedent(
         call("suspend", "POST", "/v1/admin/tenants/tenant-a/status", admin,
              {"status": "suspended"})
         call("suspended_ticket", "GET", "/v1/storage/content", ticket)
-        results["mc_alias"] = control_plane.MC_ALIAS
+        results["workspace_bucket"] = control_plane.OBJECT_STORE_WORKSPACE_BUCKET
     finally:
         server.shutdown()
         server.server_close()
@@ -306,17 +338,17 @@ class ObjectOwnerDerivationTests(unittest.TestCase):
     def response(self, name: str) -> dict:
         return self.results[name]
 
-    @property
-    def mc_alias(self) -> str:
-        return self.results["mc_alias"]
-
     def keys_touched(self, response: dict) -> list[str]:
-        """Object keys the store client was asked to operate on."""
+        """Object keys the store client was asked to operate on.
+
+        Each recorded entry is [operation, bucket, key]; the key is the third
+        field because the client is called with Bucket and Key rather than an
+        alias-prefixed path.
+        """
         return [
-            argument.split("/", 2)[2]
+            command[2]
             for command in response["mc"]
-            for argument in command
-            if argument.startswith(self.mc_alias + "/")
+            if len(command) == 3 and command[2]
         ]
 
     def test_the_probe_exercised_every_object_route(self) -> None:

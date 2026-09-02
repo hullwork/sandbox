@@ -11,7 +11,6 @@ from .store import (
 )
 import contextlib
 from datetime import datetime
-import json
 import time
 
 from . import core as control_plane
@@ -26,30 +25,23 @@ __all__ = (
 def reap_expired_checkpoints(now: int | None = None) -> int:
     current = now or int(time.time())
     prefix = "workspaces/"
-    output = control_plane.run_mc(
-        "ls",
-        "--recursive",
-        "--json",
-        f"{control_plane.MC_ALIAS}/{control_plane.OBJECT_STORE_WORKSPACE_BUCKET}/{prefix}",
-        max_output_bytes=8 * 1024 * 1024,
+    listed = control_plane.object_list(
+        control_plane.OBJECT_STORE_WORKSPACE_BUCKET, prefix
     )
     removed = 0
-    for raw_line in output.splitlines():
-        if not raw_line:
-            continue
+    for item in listed:
         try:
-            item = json.loads(raw_line)
             listed_key = str(item.get("key") or "")
             key = (
                 listed_key
                 if listed_key.startswith(prefix)
                 else f"{prefix}{listed_key}"
             )
-            modified = str(item.get("lastModified") or "")
+            modified = str(item.get("last_modified") or "")
             modified_at = int(
                 datetime.fromisoformat(modified.replace("Z", "+00:00")).timestamp()
             )
-        except (ValueError, TypeError, json.JSONDecodeError):
+        except (ValueError, TypeError):
             continue
         if (
             "/checkpoints/" not in key
@@ -57,11 +49,8 @@ def reap_expired_checkpoints(now: int | None = None) -> int:
             or modified_at + control_plane.CHECKPOINT_RETENTION_SECONDS > current
         ):
             continue
-        control_plane.run_mc(
-            "rm",
-            "--versions",
-            "--force",
-            f"{control_plane.MC_ALIAS}/{control_plane.OBJECT_STORE_WORKSPACE_BUCKET}/{key}",
+        control_plane.object_delete_versions(
+            control_plane.OBJECT_STORE_WORKSPACE_BUCKET, key
         )
         removed += 1
     return removed

@@ -483,12 +483,8 @@ spec:
             secretKeyRef:
               key: token
               name: sandbox-volume-auth
-        - name: SANDBOX_MAX_CONCURRENT_MC
+        - name: SANDBOX_MAX_CONCURRENT_OBJECT_OPS
           value: "1"
-        - name: SANDBOX_MC_GOMAXPROCS
-          value: "2"
-        - name: SANDBOX_MC_GOMEMLIMIT
-          value: 256MiB
 {{- if .Values.observability.tracing.endpoint }}
         - name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
           value: {{ .Values.observability.tracing.endpoint | quote }}

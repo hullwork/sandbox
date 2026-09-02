@@ -190,12 +190,8 @@ spec:
                 secretKeyRef:
                   name: sandbox-volume-auth
                   key: token
-            - name: SANDBOX_MAX_CONCURRENT_MC
+            - name: SANDBOX_MAX_CONCURRENT_OBJECT_OPS
               value: "1"
-            - name: SANDBOX_MC_GOMAXPROCS
-              value: "2"
-            - name: SANDBOX_MC_GOMEMLIMIT
-              value: 256MiB
           ports:
             - name: http
               containerPort: 8080

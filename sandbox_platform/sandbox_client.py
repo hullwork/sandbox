@@ -373,9 +373,9 @@ class SandboxManager:
             with urllib.request.urlopen(request, timeout=120) as response:
                 result = json.loads(response.read())
         except urllib.error.HTTPError as exc:
-            raise ControlPlaneError(exc.code, "MinIO blob upload failed") from exc
+            raise ControlPlaneError(exc.code, "object-store blob upload failed") from exc
         except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
-            raise ControlPlaneError(502, "MinIO blob upload failed") from exc
+            raise ControlPlaneError(502, "object-store blob upload failed") from exc
         return {**location, **result}
 
     @staticmethod

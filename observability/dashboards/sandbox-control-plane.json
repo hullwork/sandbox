@@ -158,7 +158,7 @@
       "id": 4,
       "targets": [
         {
-          "expr": "max(sandbox_mc_queue_depth)",
+          "expr": "max(sandbox_object_store_queue_depth)",
           "legendFormat": "",
           "refId": "A",
           "instant": true
