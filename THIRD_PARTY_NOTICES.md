@@ -5,7 +5,11 @@ built from this repository include third-party components under their own licens
 
 | Component | License | Distribution note |
 | --- | --- | --- |
-| Python packages and base images | Their respective licenses | See lockfiles, base-image metadata, and container build provenance for exact versions. |
+| `psycopg` | LGPL-3.0-only | Control Plane image, PostgreSQL backend (`control_plane/requirements.lock`). Used unmodified as a separately replaceable wheel, which is how the LGPL relinking condition is met; anyone distributing the image must carry this notice and the LGPL-3.0 text with it. |
+| `psycopg-binary` | LGPL-3.0-only; bundles `libpq` (PostgreSQL License) and OpenSSL (Apache-2.0) | Same image. The binary wheel statically bundles libpq and OpenSSL, so their notices travel with the image as well. |
+| `boto3`, `botocore`, `s3transfer` | Apache-2.0 | Control Plane image, every object-store operation. The `NOTICE` files ship inside the wheels. |
+| `PyMySQL` | MIT | Control Plane image, MySQL backend. |
+| Other Python packages and base images | Their respective permissive licenses | See lockfiles, base-image metadata, and container build provenance for exact versions. `tests/test_third_party_notices.py` fails when a locked package outside the permissive set is missing from this table. |
 
 ## MinIO Client (`mc`) — removed 2026-09-02
 
