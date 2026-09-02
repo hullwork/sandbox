@@ -45,7 +45,13 @@ class DocumentationTests(unittest.TestCase):
         self.assertEqual(missing, [], f"not linked from docs/adr/README.md: {missing}")
 
     def test_readme_lists_the_current_mcp_tool_surface(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        """The tool names are documented somewhere a reader will find them.
+
+        The list moved into docs/USAGE.md with the rest of the surfaces, so
+        both files count as the documented surface.
+        """
+        readme = ((ROOT / "README.md").read_text(encoding="utf-8")
+                  + (ROOT / "docs/USAGE.md").read_text(encoding="utf-8"))
         names = [tool["name"] for tool in mcp.TOOLS]
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(len(names), 9)
@@ -61,9 +67,25 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("sandbox-mcp", module_doc)
 
     def test_quickstart_uses_the_wheel_sdk_import(self) -> None:
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("from sandbox_platform.sandbox_client import Sandbox", readme)
-        self.assertNotIn("from sandbox_client import Sandbox", readme)
+        """The worked example imports from the published distribution.
+
+        `sandbox_client` on its own is the in-tree module name and does not
+        exist in an installed wheel, so a reader copying it gets ImportError.
+        The example moved from the README into docs/USAGE.md; both are checked
+        so that neither can carry the wrong form.
+        """
+        wanted = "from sandbox_platform.sandbox_client import Sandbox"
+        wrong = "from sandbox_client import Sandbox"
+        sources = {
+            name: (ROOT / name).read_text(encoding="utf-8")
+            for name in ("README.md", "docs/USAGE.md")
+        }
+        self.assertTrue(
+            any(wanted in text for text in sources.values()),
+            f"no worked SDK example in any of {sorted(sources)}",
+        )
+        for name, text in sources.items():
+            self.assertNotIn(wrong, text, f"{name} uses the in-tree import")
 
     def test_readme_names_and_links_the_composition_repository(self) -> None:
         """The pointer to the repository that describes all four must survive.

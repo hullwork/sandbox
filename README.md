@@ -2,38 +2,70 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Run an agent's shell and file operations inside a gVisor Pod on your own Kubernetes
-cluster.** A Control Plane owns Workspaces, quotas, and credentials. Agents reach it
-through one of three published surfaces — a Python SDK, the `sandbox` CLI, or a stdio
-MCP bridge — and nothing else. When the Control Plane or the Runtime is unreachable,
-the operation fails; it never falls back to executing on the host.
+**Run an agent's shell and file operations inside a gVisor Pod on your own
+Kubernetes cluster.** A Control Plane owns Workspaces, quotas and credentials.
+Agents reach it through a Python SDK, the `sandbox` CLI, or a stdio MCP bridge —
+and through nothing else. If the Control Plane or the Runtime is unreachable the
+operation fails; it never falls back to running on the host.
 
-> **Status: alpha (`0.1.0`).** No signed release has been published yet, so `main` is
-> the only channel and it is not a stability promise. See [ROADMAP.md](ROADMAP.md) for
-> the remaining pre-release work and [Known limitations](#known-limitations) for what is
-> honestly not finished.
+```text
+ ┌─ your process ──────────────────────────────────────────────────────────┐
+ │  Python SDK              sandbox CLI            stdio MCP bridge        │
+ │  sandbox_platform/       `sandbox …`            for an agent runtime    │
+ └──────────────────────────────┬──────────────────────────────────────────┘
+                                │  HTTPS + tenant API key
+                                │  the tenant is decided by the credential,
+                                │  never by anything in the request body
+════════════════════════════════▼═════════════════════════════════════════════
+ namespace: sandbox-system                              trusted control plane
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │  Control Plane  (control_plane/)                                        │
+ │    admission · quotas · tokens · workspace and runtime lifecycle        │
+ │      │                                                                  │
+ │      ├── state ──────────► PostgreSQL · MySQL · SQLite                  │
+ │      └── checkpoints ────► S3-compatible object store                   │
+ │                            workspace archives only: no process state,   │
+ │                            no memory, no writable container layer       │
+ │                                                                         │
+ │  Operator Console  (console/)   static; holds no credential of its own  │
+ └──────────────────────────────┬──────────────────────────────────────────┘
+                                │  in-cluster, NetworkPolicy-scoped
+════════════════════════════════▼═════════════════════════════════════════════
+ namespace: sandbox-workloads                default-deny, untrusted workload
+ ┌─────────────────────────────────────────────────────────────────────────┐
+ │  Runtime Pod   RuntimeClass: gvisor                                     │
+ │    runtime/       shell, PTY sessions, SSE streaming                    │
+ │    file-service/  the one path that writes workspace files              │
+ │       │                                                                 │
+ │       └── /workspace ──► Workspace PVC ◄── Volume Agent (RWX placement) │
+ └─────────────────────────────────────────────────────────────────────────┘
 
-> **Where this fits.** Sandbox Platform is one of four independently released
-> repositories. [`hullwork/platform-composition`](https://github.com/hullwork/platform-composition)
-> is the only place that describes all four together: what each one is, where the
-> boundaries between them are, and how to install the set on an enterprise cluster.
-> This README does not repeat any of that — it is about Sandbox Platform alone.
+ If the Control Plane or the Runtime is unreachable the operation fails.
+ It never falls back to running on the host.
+```
 
----
+## Try it
 
-## Contents
+```bash
+python3 -m venv .venv                  # a system-wide install is an error on Debian,
+.venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
+make test                      # 665 unit and contract tests, no network, no cluster
+make help                      # every Make target with its one-line description
+```
 
-- [Why this instead of the alternatives](#why-this-instead-of-the-alternatives)
-- [Evaluate it in one minute, no cluster required](#evaluate-it-in-one-minute-no-cluster-required)
-- [Run the full local cluster](#run-the-full-local-cluster)
-- [Using it: SDK, CLI, MCP, Console](#using-it)
-- [Common tasks](#common-tasks)
-- [Architecture](#architecture)
-- [Deployment profiles](#deployment-profiles)
-- [Security boundary](#security-boundary)
-- [Known limitations](#known-limitations)
-- [Documentation](#documentation)
-- [Contributing, support, and license](#contributing-support-and-license)
+That is the contract suite: no cluster, no credentials, nothing to clean up.
+The virtual environment is not optional on Debian, Ubuntu or Fedora — a
+system-wide `pip install` is refused there (PEP 668). `make test` uses
+`.venv/bin/python` when it exists and `python3` otherwise, so there is no
+activation step.
+[Run the full local cluster](#run-the-full-local-cluster) when you want a real
+gVisor Runtime.
+
+**Status: alpha (`0.1.0`).** `main` is the only channel and not a stability
+promise — [Known limitations](#known-limitations) is deliberately specific.
+**One of four.** [`hullwork/platform-composition`](https://github.com/hullwork/platform-composition)
+is where the four repositories are described together; this one is about Sandbox
+Platform alone.
 
 ---
 
@@ -85,53 +117,16 @@ Full method, raw evidence layout, and the explicit statement of what this number
 
 ---
 
-## Evaluate it in one minute, no cluster required
+## Look at the surfaces
 
-The full local profile needs a virtual machine with real resources (see the next
-section). If you only want to judge whether the project is worth your time, none of
-that is necessary. Each command below runs on an ordinary Linux or macOS checkout with
-Python 3.11+ installed.
-
-```bash
-python3 -m venv .venv                  # a system-wide install is an error on Debian,
-.venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
-make test                      # 664 unit and contract tests, no network, no cluster
-make help                      # every Make target with its one-line description
-```
-
-`make test` uses `.venv/bin/python` when that virtual environment exists and falls
-back to `python3` otherwise, so no `PATH` or activation step is needed.
-
-Inspect the surfaces without a running Control Plane:
+No Control Plane needed — each of these prints what it accepts:
 
 ```bash
 sandbox --help          # create / run / exec / stop / list
 sandboxctl --help       # operator surface: workspaces, templates, admin keys, audit
-sandbox-mcp --help      # required env vars and the nine agent-scoped MCP tools
+sandbox-mcp --help      # the nine agent-scoped MCP tools and their required env vars
+make help               # every Make target with its one-line description
 ```
-
-Render the Kubernetes and Helm artifacts (needs `kubectl` and `helm`; no cluster
-contact):
-
-```bash
-kubectl kustomize k8s
-kubectl kustomize overlays/local
-make chart-lint
-make chart-render
-```
-
-Preview the operator Console against its in-memory fake backend (needs Node.js and
-npm; no cluster):
-
-```bash
-npm --prefix console ci --ignore-scripts
-VITE_USE_MOCK=1 npm --prefix console run dev -- --host 127.0.0.1
-```
-
-In mock mode, sign in as `admin`, `tenant`, `breakglass`, or `nowhitelist` to switch
-identities; any other value returns 401.
-
----
 
 ## Run the full local cluster
 
@@ -214,215 +209,17 @@ Docker daemon until removed with `docker rmi`.
 
 ## Using it
 
-### Python SDK
-
-```bash
-export SANDBOX_CONTROL_PLANE_URL=http://127.0.0.1:18080
-export SANDBOX_TOKEN="$(make --no-print-directory dev-token)"
-python3 - <<'PY'
-from sandbox_platform.sandbox_client import Sandbox
-
-sandbox = Sandbox.get_or_create("demo")
-result = sandbox.run_command("printf", ["sandbox-ready\\n"])
-print(result.stdout, end="")
-sandbox.stop()  # Runtime stops; Workspace files remain.
-PY
-```
-
-`Sandbox` is the high-level facade. The lower-level `SandboxManager` — exported as
-`sandbox_client.MANAGER` — carries the object-store, checkpoint, and shell-session
-operations used in [Common tasks](#common-tasks).
-
-### CLI
-
-```bash
-sandbox create demo
-sandbox exec demo -- python -c 'print("sandbox-ready")'
-sandbox run --name demo --stop -- sh -lc 'printf "done\\n"'
-sandbox list
-```
-
-`sandbox create` prints the name, Runtime id, and Workspace id separated by tabs
-(`demo<TAB>sb-...<TAB>ws-...`). `sandbox list` prints one active Runtime per line as
-`id`, `workspace_id`, `status`, `template`. Both accept `--json` for machine output.
-
-`sandbox` is the user surface. `sandboxctl` is a separate operator surface and may
-expose tenant-wide administrative data; keep the two credentials distinct.
-
-### MCP bridge
-
-`sandbox-mcp` is a stdio MCP server. It requires three environment variables and
-refuses to start without them:
-
-| Variable | Meaning |
-| --- | --- |
-| `SANDBOX_CONTROL_PLANE_URL` | Control Plane base URL, for example `http://127.0.0.1:18080` |
-| `SANDBOX_TOKEN` | Control Plane or tenant bearer token |
-| `SANDBOX_SESSION_ID` | Any stable string identifying this agent session; it selects the Workspace the session lands in |
-
-Claude Code:
-
-```bash
-claude mcp add sandbox \
-  -e SANDBOX_CONTROL_PLANE_URL=http://127.0.0.1:18080 \
-  -e SANDBOX_TOKEN="$(make --no-print-directory dev-token)" \
-  -e SANDBOX_SESSION_ID=my-project \
-  -- sandbox-mcp
-```
-
-Any host that reads an `mcpServers` object:
-
-```json
-{
-  "mcpServers": {
-    "sandbox": {
-      "command": "sandbox-mcp",
-      "env": {
-        "SANDBOX_CONTROL_PLANE_URL": "http://127.0.0.1:18080",
-        "SANDBOX_TOKEN": "<paste the value of make dev-token>",
-        "SANDBOX_SESSION_ID": "my-project"
-      }
-    }
-  }
-}
-```
-
-From a source checkout without installing the wheel, use
-`python3 -m sandbox_platform.mcp` as the command with the same environment.
-
-The bridge exposes exactly nine agent-scoped tools: `shell`, `shell_session`,
-`sandbox_status`, `file_read`, `file_write`, `file_edit`, `file_glob`, `file_grep`,
-and `workspace_checkpoint`. Tenant, key, template, audit, and arbitrary Runtime
-administration are deliberately outside the agent surface.
-
-### Operator Console
-
-Keep this running and open <http://127.0.0.1:18081>:
-
-```bash
-make console-forward
-```
-
-The Console embeds no credential; a key you paste stays in tab-scoped
-`sessionStorage`. For the local profile, paste the value of `make dev-token` — it is
-cluster-administrator-equivalent and is intended only for this profile.
-
-A deployment offers whichever of these sign-in methods it has configured:
-
-- **Single sign-on.** Set `SANDBOX_CONTROL_PLANE_OIDC_*` and the Control Plane runs an
-  OpenID Connect Authorization Code + PKCE flow against your provider. It is a relying
-  party only: it issues assertions for nobody and accepts none.
-  `SANDBOX_CONTROL_PLANE_OIDC_AUDIENCE` has no default — give this Control Plane an
-  audience no other service shares, or an ID token minted for a neighbouring service
-  is accepted here too.
-- **An API key.** Keys issued through `/v1/admin/keys` are revocable, attributable,
-  and can carry an expiry and a permission set. This is the route for machine callers
-  and the everyday route for people without SSO.
-- **`SANDBOX_CONTROL_PLANE_TOKEN`, the break-glass token.** The way in when the
-  identity provider is unreachable. It is administrator-equivalent, cannot be revoked,
-  and cannot be attributed to a person — so every use is written to the Control Plane
-  log with its source address, counted under
-  `sandbox_credential_uses_total{kind="break-glass"}`, and shown as a banner for the
-  whole Console session. It is off by default whenever an OIDC provider is configured,
-  and switching it off removes the credential from the process: the API refuses it, not
-  just the login form. Configuring no provider *and* switching it off makes the
-  Control Plane refuse to start.
-
-That escape hatch is documented on purpose. One that exists only in the source is one
-the operators do not know about and an attacker reading the code does.
-
-Configuration details are in the [configuration reference](docs/CONFIGURATION.md); the
-[authentication contract](docs/AUTH.md) is the published agreement for client authors.
-
-The Console ships English and Simplified Chinese. It follows the browser language on
-first use and stores an explicit choice in `localStorage` under
-`sandbox-console-language`. Catalogs live in `console/src/i18n/locales`, typed against
-the English source so a missing key fails `npm --prefix console run typecheck`; adding
-a locale means adding its code to `LOCALES` in `console/src/i18n/index.tsx`, adding a
-catalog, and adding the option to `LanguageSwitcher`.
-
----
-
-## Common tasks
-
-Every method named here exists in
-[`sandbox_platform/sandbox_client.py`](sandbox_platform/sandbox_client.py) and
-[`sandbox_platform/sandbox_cli.py`](sandbox_platform/sandbox_cli.py). Numeric limits
-come from [System specifications](docs/SYSTEM_SPECIFICATIONS.md).
-
-**Upload a file.** Text up to 1 MB goes straight into the Workspace:
-
-```python
-sandbox.write_file("input/data.csv", csv_text)
-sandbox.write_files([{"path": "a.txt", "content": "1"}, {"path": "b.txt", "content": "2"}])
-```
-
-Larger or binary inputs go through the object store: `MANAGER.put_agent_blob(...)`
-uploads with a single-use ticket, then
-`MANAGER.import_object_to_workspace(locator, "input/data.bin")` copies the object into
-the Workspace.
-
-When an agent host keeps its durable file library in a different S3 plane, the
-recommended integration is federated transfer: the host's artifact service streams to
-and from these same ticketed Control Plane endpoints. The host never receives the
-Sandbox S3 credential and the Sandbox never receives the host's. Deliberately sharing
-one physical bucket is also possible, but that is a decision the integrating platform
-owns.
-
-**Run a long task.** One `shell` call is capped at 30 seconds
-(`MAX_EXEC_TIMEOUT_SECONDS` in `runtime/runtime_server.py`). For anything longer,
-start a PTY session and poll it; a session may live up to one hour of wall time:
-
-```python
-MANAGER.shell_session("exec", "build", command="make -j4 test", async_mode=True)
-result = MANAGER.shell_session("wait", "build", timeout_seconds=120)  # repeat until done
-```
-
-From the CLI, `sandbox exec demo --timeout 30 -- <command>` uses the same 30-second cap.
-
-**Get artifacts back.** `sandbox.read_file("out/report.txt")` returns bounded text. For
-whole files, `MANAGER.export_workspace_object("out/report.pdf", locator)` writes the
-file to the object store and `MANAGER.open_object(locator)` downloads it. For a
-directory of many small deliverables,
-`MANAGER.export_workspace_collection("artifacts", locator)` creates one bounded
-`tar.gz` with a `manifest.json` of member paths, sizes, and SHA-256 values. It exports
-regular files only and omits internal state, legacy compaction data, and symlinks.
-
-**Checkpoint and restore.** Checkpoints are explicit recovery points, not the normal
-file-persistence path — the Workspace PVC already survives Runtime release.
-`sandbox.checkpoint()` archives the Workspace *files* (not processes or memory) into
-object storage; `MANAGER.list_workspace_checkpoints()` lists archives and
-`MANAGER.restore_workspace(checkpoint_id)` replaces the Workspace with one. The MCP
-tool `workspace_checkpoint` exposes the same archive operation to agents.
-
-**Run several sandboxes in parallel.** Each name is an independent Workspace with its
-own Runtime; `Sandbox.create("job-1")` and `Sandbox.create("job-2")` share no files.
-The reference deployment admits 4 concurrent Runtimes (`SANDBOX_MAX_RUNTIMES`) and 64
-Workspaces (`SANDBOX_MAX_WORKSPACES`); `sandbox list` shows what is running.
-
-**Install packages.** The default Runtime image deliberately ships without `pip` or any
-package manager ([`runtime/Dockerfile`](runtime/Dockerfile) removes pip after the build
-so its vendored dependencies and installation attack surface go with it). The image
-carries Python 3.14 with the pptx/docx/xlsx/pdf libraries, Node.js 24 with npm, plus
-bash, git, curl, jq, make, and unzip. To add packages, build your own image, register
-it under `SANDBOX_TEMPLATES`, and pass `--template <id>` to `sandbox create` or
-`template=` to `Sandbox.create`.
-
----
+Four surfaces reach the same Control Plane — a Python SDK, the `sandbox` CLI, a
+stdio MCP bridge for agent runtimes, and the operator console. Each one is
+documented with a worked example in [docs/USAGE.md](docs/USAGE.md), along with
+the tasks that come up once something is running: issuing tokens, taking a
+checkpoint, importing files, and reading the audit log.
 
 ## Architecture
 
-```text
-Agent host
-    │ Python SDK, sandbox CLI, or stdio MCP
-    ▼
-Sandbox Control Plane ─── PostgreSQL, MySQL, or SQLite state
-    │ policy, tokens, workspace/runtime lifecycle
-    ├──► gVisor Runtime Driver ── Kubernetes RuntimeClass
-    ├──► Workspace Volume Agent ─── Workspace PVC
-    ├──► Runtime Pod (gVisor) ── shell, files, PTY
-    └──► cluster-local Ceph RGW ── explicit checkpoints and bounded imports/exports
-```
+The diagram at the top of this file shows the layout. This section is the
+detail behind it.
+
 
 | Component | Responsibility |
 | --- | --- |
