@@ -10,7 +10,8 @@ merely unusual client would:
 * the Grafana panel proxy answers 400 to a ``Content-Length`` it cannot
   parse or that is negative, instead of dying or waiting for EOF;
 * the access log records the request path and never the query string, so
-  the OIDC callback's ``code`` and ``state`` stay out of the process log;
+  the OIDC callback's ``code`` and ``state`` stay out of the process log, and
+  no rejection path writes the presented bearer credential either;
 * identity is per request, not per connection: under HTTP/1.1 keep-alive one
   handler instance serves several requests, and the second must not inherit
   the first one's tenant (``handle_one_request`` resets every field the
@@ -120,6 +121,7 @@ class GrafanaContentLengthTests(unittest.TestCase):
 
 class AccessLogQueryTests(unittest.TestCase):
     SECRET = "SUPERSECRETCODE-4f1e"
+    BEARER = "sk_BEARERSECRET7c2d9e1f0a3b4c5d6e7f8091a2b3c4d5e6f7"
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -128,6 +130,16 @@ class AccessLogQueryTests(unittest.TestCase):
             call("whoami", "GET", "/v1/whoami?code={cls.SECRET}&state=abc", admin)
             call("callback", "GET", "/v1/auth/oidc/callback?code={cls.SECRET}&state=abc")
             call("files", "GET", "/v1/workspaces?filter={cls.SECRET}", admin)
+            # A credential that does not exist, on a protected route, on an
+            # admin route and on a scoped route: every rejection path logs
+            # something, and none of it may be the credential.
+            call("bearer_whoami", "GET", "/v1/whoami", "{cls.BEARER}")
+            call("bearer_admin", "GET", "/v1/admin/tenants", "{cls.BEARER}")
+            call("bearer_files", "GET", "/v1/workspaces/ws-0123456789ab/files/list?path=.", "{cls.BEARER}")
+            call("bearer_tenant", "GET", "/v1/whoami", "{cls.BEARER}", headers={{"X-Sandbox-Tenant": "acme"}})
+            call("bearer_subject", "GET", "/v1/whoami", "{cls.BEARER}", headers={{"X-Acting-Subject": "a" * 32}})
+            call("bearer_scoped", "POST", "/v1/sandboxes/sb-0123456789ab/mcp", "{cls.BEARER}", {{}})
+            call("bearer_ticket", "GET", "/v1/storage/content", "{cls.BEARER}")
             """
         )
 
@@ -147,6 +159,16 @@ class AccessLogQueryTests(unittest.TestCase):
         log_lines = [line for line in self.stdout.splitlines() if not line.startswith("RESULTS ")]
         self.assertEqual([line for line in log_lines if self.SECRET in line], [])
         self.assertEqual([line for line in log_lines if "?" in line], [])
+
+    def test_a_bearer_credential_never_reaches_the_log(self) -> None:
+        for name in ("bearer_whoami", "bearer_admin", "bearer_files", "bearer_tenant",
+                     "bearer_subject", "bearer_scoped", "bearer_ticket"):
+            with self.subTest(route=name):
+                self.assertEqual(self.results[name]["status"], 401, self.results[name])
+        log_lines = [line for line in self.stdout.splitlines() if not line.startswith("RESULTS ")]
+        self.assertTrue(log_lines)
+        for fragment in (self.BEARER, self.BEARER[3:20], "BEARERSECRET"):
+            self.assertEqual([line for line in log_lines if fragment in line], [], fragment)
 
 
 class KeepAliveIdentityTests(unittest.TestCase):

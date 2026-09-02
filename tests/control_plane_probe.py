@@ -8,8 +8,8 @@ port, and the break-glass token is the administrator.
 
 A test supplies the body of the probe (Python source, run with ``call``,
 ``results``, ``admin``, ``api``, ``control_plane`` and ``server`` in scope) and
-gets back the ``results`` dict plus the subprocess stdout, which carries the
-handler's access log lines.
+gets back the ``results`` dict plus the subprocess output (stdout followed by
+stderr), which carries the handler's access log lines.
 """
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ def environment(directory: str, **overrides: str) -> dict[str, str]:
 
 
 def run_probe(body: str, **overrides: str) -> tuple[dict, str]:
-    """Run ``body`` inside the probe; return (results, stdout)."""
+    """Run ``body`` inside the probe; return (results, stdout + stderr)."""
     source = PRELUDE + textwrap.indent(textwrap.dedent(body), "    ") + EPILOGUE
     with tempfile.TemporaryDirectory() as directory:
         result = subprocess.run(
@@ -183,4 +183,4 @@ def run_probe(body: str, **overrides: str) -> tuple[dict, str]:
     lines = [line for line in result.stdout.splitlines() if line.startswith("RESULTS ")]
     if len(lines) != 1:
         raise AssertionError("probe printed no RESULTS line:\n" + result.stdout + result.stderr)
-    return json.loads(lines[0][len("RESULTS "):]), result.stdout
+    return json.loads(lines[0][len("RESULTS "):]), result.stdout + result.stderr
