@@ -31,7 +31,14 @@ sandbox = "sandbox_platform.sandbox_cli:main"
 sandboxctl = "sandbox_platform.sandboxctl:main"
 
 [project.optional-dependencies]
-test = ["PyYAML>=6.0,<7"]
+# boto3 is a Control Plane runtime dependency, pinned with hashes in
+# control_plane/requirements.lock and installed into that image. It is here so
+# the suite can import control_plane.core, and deliberately *not* in
+# [project.dependencies]: the published wheel is the SDK, and an SDK consumer
+# has no reason to acquire an S3 client. CI installs only this extra, which is
+# how a machine that happened to have boto3 already could run the whole suite
+# green while CI could not import a single test module.
+test = ["PyYAML>=6.0,<7", "boto3>=1.34,<2"]
 
 [tool.hatch.build.targets.wheel]
 # The wheel ships only the supported client surface, namespaced under
