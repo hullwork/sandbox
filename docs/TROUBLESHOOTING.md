@@ -36,7 +36,7 @@ overrode `SANDBOX_STATE_DIR` or `SANDBOX_KUBE_CONTEXT`, use the same values agai
 
 **Cause.** Either the `gvisor` RuntimeClass is missing, `runsc` is not installed on the
 node that was selected, or no node carries the label Control Plane uses for placement
-(`sandbox.convee.io/node-role=runtime` in the local profile, `SANDBOX_RUNTIME_NODE_SELECTOR`
+(`sandbox.hullwork.com/node-role=runtime` in the local profile, `SANDBOX_RUNTIME_NODE_SELECTOR`
 elsewhere).
 
 **Check.**

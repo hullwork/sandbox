@@ -18,3 +18,6 @@ updates:
   - package-ecosystem: docker
     directory: /control_plane
     schedule: { interval: weekly }
+  - package-ecosystem: docker
+    directory: /console
+    schedule: { interval: weekly }

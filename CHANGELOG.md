@@ -6,8 +6,48 @@ Versioning after its first public release.
 
 ## Unreleased
 
+### Added
+
+- Standalone local gVisor environment, Python SDK, CLI, stdio MCP, and operator Console
+  surfaces for the first public release candidate.
+- `make destroy-local`, a KUBECONFIG-aware Makefile, and resource checks in `make doctor`.
+- `overlays/external-deps` as an opt-in example for an external MySQL/S3 control plane.
+- Behavior tests for the store state machine, admission quota, reaper, Runtime manifest
+  security fields, checkpoint restore validation, exec timeouts, and readiness.
+- Route completeness and tenant-ownership tests that run a SQLite-backed Control Plane.
+- `docs/TROUBLESHOOTING.md`, a terminology table, and MCP host configuration examples.
+- MySQL control-plane backend (`SANDBOX_STORE_BACKEND=mysql`) with `PyMySQL` pinned in
+  the Control Plane image; `docs/CONFIGURATION.md` documents the `SANDBOX_DB_*` settings.
+- The wheel and sdist are published to PyPI as `sandbox-platform` from the release tag,
+  through Trusted Publishing (OpenID Connect) rather than a stored API token, from a job
+  that waits on the `pypi` environment approval and uploads the artifact this run
+  already scanned, attested, and signed. Consumers can pin a version and hash instead of
+  a `git+https://` requirement, which no lock file under `pip --require-hashes` accepts
+  and which PyPI refuses in uploaded metadata. `docs/RELEASE.md` lists the one-time
+  registration maintainers must do by hand.
+- `scripts/check-wheel-surface.py` refuses a wheel whose top-level entries are not
+  exactly `sandbox_platform`. Those names install into a shared `site-packages` and are
+  claimed globally, so a flat module added to the packaging configuration would collide
+  with any unrelated distribution of the same name. It runs in CI, in the release build,
+  and once more on the bytes about to reach PyPI.
+- `twine check --strict` runs on the wheel and sdist before a tag is spent, because PyPI
+  rejects an unrenderable long description only after the version number is consumed.
+
 ### Changed
 
+- **Breaking for existing clusters:** every label, annotation and node-selector key
+  the platform writes or reads now carries the `sandbox.hullwork.com/` prefix
+  (`sandbox-id`, `workspace-id`, `tenant`, `template`, `created-at`, `expires-at`,
+  `hard-expires-at`, `runtime-node`, `purpose`, and the `node-role` node label and
+  taint). The previous `convee.io/` and `sandbox.convee.io/` prefixes belonged to a
+  maintainer's personal domain. Runtime Pods created under the old prefix are
+  invisible to the new reaper: drain them before upgrading, and re-label Runtime
+  nodes. `tests/test_label_domain.py` refuses the retired prefix and
+  `tests/test_annotation_keys.py` reads the new keys back through the real driver
+  and reaper.
+- The repository is self-contained: the README no longer presents it as one of
+  several related repositories, and the `Package` descriptor for a separate
+  infrastructure product was removed from the chart.
 - Console: the open section survives a reload (kept in the same tab-scoped storage as
   the credential and cleared with it; a section the identity cannot see falls back to
   the overview). The overview runs one refresh at a time, skips ticks while the tab is
@@ -28,6 +68,56 @@ Versioning after its first public release.
   `SANDBOX_MAX_MC_QUEUE` is `SANDBOX_MAX_OBJECT_QUEUE`, `OBJECT_STORE_CLIENT` and the
   two Go runtime knobs are gone, and the `sandbox_mc_queue_*` metrics are
   `sandbox_object_store_queue_*` (dashboard and alert rule updated with them).
+
+- The standalone Rook v1.20 RGW bootstrap now installs the Ceph CSI operator,
+  which supplies the `CephConnection` CRD required by current Rook cluster
+  reconciliation even when Sandbox does not provision Ceph block volumes. Its
+  deterministic local loop OSD is selected by exact `/dev/loop0` path because
+  current Rook excludes loop devices from `deviceFilter` matches. RGW readiness
+  now waits on `status.phase=Ready`, which Rook v1.20 actually publishes.
+- The consumer surface (`sandbox_client`, `mcp`, `sandbox_cli`, `sandboxctl`,
+  `control_plane_transport`, `safe_stdout`) moved into the `sandbox_platform` package.
+  Import paths changed; console-script names did not.
+- `sandbox-mcp` validates `SANDBOX_CONTROL_PLANE_URL`, `SANDBOX_TOKEN`, and `SANDBOX_SESSION_ID`
+  at startup and supports `--help` / `--version`.
+- The OpenAPI document now matches Control Plane responses (`access_token_expires_in`,
+  `workspace_id`, `template`, files routes) and closes fixed-shape schemas.
+- Control Plane uses `strategy: Recreate`; database statements, idle transactions, and the store
+  lock are bounded; the HTTP handler applies a socket timeout.
+
+### Removed
+
+- `control_plane/control_sso.py` and `POST /v1/auth/control-sso`. Accepting a federated
+  assertion made another service the identity provider for this one, and used the
+  bearer token that service holds as the signing key for it - a bearer token must
+  be sent to the other party (RFC 6750) while a signing key must not be shared,
+  and one value cannot satisfy both. Browser identity now comes from an OIDC
+  provider, and the other services are ordinary API-key tenants here.
+  `CONTROL_SSO_ISSUER` and `SANDBOX_CONTROL_PLANE_LEGACY_TOKEN_ENABLED` are gone; the second is
+  replaced by `SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED`.
+
+### Fixed
+
+- Findings of the 2026-09-02 pre-release review, in four groups. Control plane:
+  request handling, admission and readiness defects found by reading the API
+  and store paths. Lifecycle: Runtime, workspace and checkpoint state transitions
+  that could strand a row or a Pod. Supply chain: image, lockfile and release
+  workflow gaps. Documentation and compliance: the object-store hop is described
+  as "not traced yet" rather than "cannot be traced" (`mc` is gone), the
+  configuration reference lists every environment variable the code reads
+  across all four roles, `THIRD_PARTY_NOTICES.md` names the LGPL database
+  driver, `docs/RELEASE.md` carries the before-public checklist, and the
+  comments guarding the `/healthz`-versus-readiness decision and the shutdown
+  budget are readable English again. Each group is pinned by tests that fail on
+  the state the review found.
+- `WORKSPACE_ID_KEY` is required and no longer falls back to `SIGNING_KEY`.
+- `GET /v1/admin/audit` returned no response because of a keyword-only argument.
+- Re-registering a soft-deleted Workspace no longer fails on the retained row.
+
+- The Control Plane image was built without the MySQL driver, so a `mysql` deployment passed
+  `/readyz` while every tenant request failed with `503`. The driver is now installed,
+  imported during the image build, and a missing driver stops Control Plane at startup with
+  the package name instead of being logged as a transient store outage.
 
 ### Security
 
@@ -104,82 +194,10 @@ Versioning after its first public release.
   overwrote them would reverse it invisibly; Control Plane picks flags only for a trace
   it starts itself. A malformed header is treated as absent and never fails the
   request: an observability aid must not decide availability. Object-storage
-  traffic leaves through the `mc` client, which has no header injection point,
-  so that hop is untraced and says so in the README.
-
-### Removed
-
-- `control_plane/control_sso.py` and `POST /v1/auth/control-sso`. Accepting a federated
-  assertion made another service the identity provider for this one, and used the
-  bearer token that service holds as the signing key for it - a bearer token must
-  be sent to the other party (RFC 6750) while a signing key must not be shared,
-  and one value cannot satisfy both. Browser identity now comes from an OIDC
-  provider, and the other services are ordinary API-key tenants here.
-  `CONTROL_SSO_ISSUER` and `SANDBOX_CONTROL_PLANE_LEGACY_TOKEN_ENABLED` are gone; the second is
-  replaced by `SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED`.
-
-### Added
-
-- Standalone local gVisor environment, Python SDK, CLI, stdio MCP, and operator Console
-  surfaces for the first public release candidate.
-- `make destroy-local`, a KUBECONFIG-aware Makefile, and resource checks in `make doctor`.
-- `overlays/external-deps` as an opt-in example for an external MySQL/S3 control plane.
-- Behavior tests for the store state machine, admission quota, reaper, Runtime manifest
-  security fields, checkpoint restore validation, exec timeouts, and readiness.
-- Route completeness and tenant-ownership tests that run a SQLite-backed Control Plane.
-- `docs/TROUBLESHOOTING.md`, a terminology table, and MCP host configuration examples.
-- MySQL control-plane backend (`SANDBOX_STORE_BACKEND=mysql`) with `PyMySQL` pinned in
-  the Control Plane image; `docs/CONFIGURATION.md` documents the `SANDBOX_DB_*` settings.
-- The wheel and sdist are published to PyPI as `sandbox-platform` from the release tag,
-  through Trusted Publishing (OpenID Connect) rather than a stored API token, from a job
-  that waits on the `pypi` environment approval and uploads the artifact this run
-  already scanned, attested, and signed. Consumers can pin a version and hash instead of
-  a `git+https://` requirement, which no lock file under `pip --require-hashes` accepts
-  and which PyPI refuses in uploaded metadata. `docs/RELEASE.md` lists the one-time
-  registration maintainers must do by hand.
-- `scripts/check-wheel-surface.py` refuses a wheel whose top-level entries are not
-  exactly `sandbox_platform`. Those names install into a shared `site-packages` and are
-  claimed globally, so a flat module added to the packaging configuration would collide
-  with any unrelated distribution of the same name. It runs in CI, in the release build,
-  and once more on the bytes about to reach PyPI.
-- `twine check --strict` runs on the wheel and sdist before a tag is spent, because PyPI
-  rejects an unrenderable long description only after the version number is consumed.
-
-### Changed
-
-- The standalone Rook v1.20 RGW bootstrap now installs the Ceph CSI operator,
-  which supplies the `CephConnection` CRD required by current Rook cluster
-  reconciliation even when Sandbox does not provision Ceph block volumes. Its
-  deterministic local loop OSD is selected by exact `/dev/loop0` path because
-  current Rook excludes loop devices from `deviceFilter` matches. RGW readiness
-  now waits on `status.phase=Ready`, which Rook v1.20 actually publishes.
-- The consumer surface (`sandbox_client`, `mcp`, `sandbox_cli`, `sandboxctl`,
-  `control_plane_transport`, `safe_stdout`) moved into the `sandbox_platform` package.
-  Import paths changed; console-script names did not.
-- `sandbox-mcp` validates `SANDBOX_CONTROL_PLANE_URL`, `SANDBOX_TOKEN`, and `SANDBOX_SESSION_ID`
-  at startup and supports `--help` / `--version`.
-- The OpenAPI document now matches Control Plane responses (`access_token_expires_in`,
-  `workspace_id`, `template`, files routes) and closes fixed-shape schemas.
-- `overlays/local` is self-contained again (SQLite plus in-cluster MinIO).
-- Control Plane uses `strategy: Recreate`; database statements, idle transactions, and the store
-  lock are bounded; the HTTP handler applies a socket timeout.
-
-### Fixed
-
-- `WORKSPACE_ID_KEY` is required and no longer falls back to `SIGNING_KEY`.
-- `GET /v1/admin/audit` returned no response because of a keyword-only argument.
-- Re-registering a soft-deleted Workspace no longer fails on the retained row.
-
-- The Control Plane image was built without the MySQL driver, so a `mysql` deployment passed
-  `/readyz` while every tenant request failed with `503`. The driver is now installed,
-  imported during the image build, and a missing driver stops Control Plane at startup with
-  the package name instead of being logged as a transient store outage.
-
-### Security
+  traffic leaves through `boto3`, which does not yet propagate `traceparent`,
+  so that hop is not traced yet and the README says so.
 
 - Documented gVisor, credential, workspace, object-store, and fail-closed boundaries.
-- Declared the MinIO Client as a Control Plane runtime dependency and ship its source notice in
-  the image.
 
 The repository has not published a stable release. Release notes for `v0.1.0` will
 replace this summary with the reviewed artifact, migration, compatibility, and E2E

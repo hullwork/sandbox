@@ -182,8 +182,8 @@ class GVisorRuntimeDriver:
             item.get("type") == "Ready" and item.get("status") == "True"
             for item in status.get("conditions", [])
         )
-        runtime_id = labels.get("convee.io/sandbox-id") or ""
-        workspace_id = labels.get("convee.io/workspace-id") or ""
+        runtime_id = labels.get("sandbox.hullwork.com/sandbox-id") or ""
+        workspace_id = labels.get("sandbox.hullwork.com/workspace-id") or ""
         return RuntimeInstance(
             runtime_id=runtime_id,
             workspace_id=workspace_id,
@@ -191,12 +191,12 @@ class GVisorRuntimeDriver:
             state="running" if ready else str(status.get("phase") or "unknown").lower(),
             ready=ready,
             isolation=str(spec.get("runtimeClassName") or "cluster-default"),
-            template_id=labels.get("convee.io/template", "default"),
-            tenant_id=labels.get("convee.io/tenant"),
-            created_at=annotations.get("convee.io/created-at"),
-            expires_at=cls._int_annotation(annotations, "convee.io/expires-at"),
+            template_id=labels.get("sandbox.hullwork.com/template", "default"),
+            tenant_id=labels.get("sandbox.hullwork.com/tenant"),
+            created_at=annotations.get("sandbox.hullwork.com/created-at"),
+            expires_at=cls._int_annotation(annotations, "sandbox.hullwork.com/expires-at"),
             hard_expires_at=cls._int_annotation(
-                annotations, "convee.io/hard-expires-at"
+                annotations, "sandbox.hullwork.com/hard-expires-at"
             ),
             message=status.get("message"),
             node=spec.get("nodeName"),
@@ -250,7 +250,7 @@ class GVisorRuntimeDriver:
                 "pods",
                 label_selector=(
                     "app.kubernetes.io/name=sandbox-runtime,"
-                    f"convee.io/workspace-id={workspace_id}"
+                    f"sandbox.hullwork.com/workspace-id={workspace_id}"
                 ),
             )
         except KubeError as exc:
@@ -318,7 +318,7 @@ class GVisorRuntimeDriver:
                 self.settings.workload_namespace,
                 "pods",
                 self.resource_name(runtime_id),
-                {"convee.io/expires-at": str(expires_at)},
+                {"sandbox.hullwork.com/expires-at": str(expires_at)},
             )
         except KubeError as exc:
             raise self._error(exc) from exc

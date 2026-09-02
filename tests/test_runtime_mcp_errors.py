@@ -558,5 +558,78 @@ class RuntimeSocketTimeoutTests(unittest.TestCase):
         )
 
 
+class RuntimeTicketGateTests(unittest.TestCase):
+    """``/mcp`` and ``/activity`` open only for a runtime ticket of this instance.
+
+    ``require_runtime_auth`` is the whole of the Runtime's authentication: a
+    ticket for the wrong kind (a workspace ticket for the same sandbox), for
+    another sandbox, from another key, from a stale epoch, or no ticket at all
+    must all be a 401 before the request body is even read. A mutation that
+    makes the gate return True unconditionally has to turn this class red.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.server = LocalRuntimeServer()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.close()
+
+    def request(self, method: str, path: str, *, ticket: str | None) -> tuple[int, dict]:
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.port, timeout=10)
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if ticket is not None:
+            headers["Authorization"] = f"Bearer {ticket}"
+        body = None
+        if method == "POST":
+            body = json.dumps({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {"protocolVersion": runtime_server.PROTOCOL_VERSION,
+                           "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+            })
+            headers["MCP-Protocol-Version"] = runtime_server.PROTOCOL_VERSION
+            headers["Mcp-Method"] = "initialize"
+        try:
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+
+    def wrong_tickets(self) -> dict[str, str]:
+        key, sandbox, epoch = (
+            runtime_server.CAPABILITY_KEY, runtime_server.SANDBOX_ID, runtime_server.CAPABILITY_EPOCH
+        )
+        return {
+            "workspace kind": capability_ticket.issue(key, "workspace", sandbox, epoch),
+            "other sandbox": capability_ticket.issue(key, "runtime", "sb-ffffffffffff", epoch),
+            "other key": capability_ticket.issue(key + "-not", "runtime", sandbox, epoch),
+            "stale epoch": capability_ticket.issue(key, "runtime", sandbox, epoch + 1),
+            "garbage": "not-a-ticket",
+        }
+
+    def test_a_valid_runtime_ticket_opens_both_routes(self) -> None:
+        status, body = self.request("GET", "/activity", ticket=runtime_ticket())
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["sandbox_id"], runtime_server.SANDBOX_ID)
+        status, body = self.request("POST", "/mcp", ticket=runtime_ticket())
+        self.assertEqual(status, 200, body)
+        self.assertIn("result", body)
+
+    def test_no_ticket_is_a_401_on_both_routes(self) -> None:
+        for method, path in (("GET", "/activity"), ("POST", "/mcp")):
+            with self.subTest(route=path):
+                status, body = self.request(method, path, ticket=None)
+                self.assertEqual((status, body), (401, {"error": "unauthorized"}))
+
+    def test_a_ticket_that_is_not_this_runtimes_is_a_401(self) -> None:
+        for label, ticket in self.wrong_tickets().items():
+            for method, path in (("GET", "/activity"), ("POST", "/mcp")):
+                with self.subTest(ticket=label, route=path):
+                    status, body = self.request(method, path, ticket=ticket)
+                    self.assertEqual((status, body), (401, {"error": "unauthorized"}))
+
+
 if __name__ == "__main__":
     unittest.main()

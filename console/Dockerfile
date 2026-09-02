@@ -5,7 +5,14 @@ RUN npm ci --ignore-scripts
 COPY . .
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:a6c3ec0c0d249d68b0682df854d4a9e222b90fb607dc3fcf2f1d2fcbc85d347e
+FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9
+# Temporary, until the base image is rebuilt: this digest ships libexpat
+# 2.8.3-r0 (CVE-2026-66046, CVE-2026-76641) while Alpine 3.24 already carries
+# the fixed 2.8.4-r0, so the image gate would refuse it. Remove the two lines
+# below once a newer base digest passes `trivy image` on its own; they are
+# the one place this build reaches the package index after the FROM.
+USER root
+RUN apk upgrade --no-cache libexpat
 COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY entrypoint.sh /usr/local/bin/sandbox-console-entrypoint
 COPY --from=build /app/dist /usr/share/nginx/html

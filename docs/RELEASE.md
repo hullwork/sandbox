@@ -31,6 +31,45 @@ from the same release tag. `main` is development state, not a release channel.
 Supported security fixes target the newest release and current `main`. See
 `SECURITY.md` for private reporting.
 
+## Before the repository goes public
+
+Each of these is a GitHub setting or an external registration that no workflow
+can create, and most of them fail silently when forgotten: the links keep
+rendering, they just lead nowhere. Do them in this order, on the day the
+repository is made public, before the first tag.
+
+1. **Private vulnerability reporting.** Turn it on under **Settings -> Code
+   security -> Private vulnerability reporting**. It only exists for public
+   repositories and is off by default, and `SECURITY.md`, `SUPPORT.md` and both
+   contact links in `.github/ISSUE_TEMPLATE/config.yml` send people to
+   `security/advisories/new`. With blank issues disabled in that same file, a
+   reporter who finds a `404` there has no channel at all. Confirm with
+   `gh api repos/hullwork/sandbox/private-vulnerability-reporting`, which must
+   answer `"enabled": true`.
+2. **Old repository names.** Confirm that the repositories this code lived in
+   before the rename are deleted, not merely redirecting. GitHub redirects an
+   old name indefinitely, so a fork, CI cache or clone made under it keeps
+   working and keeps pointing at whatever history it had. `gh repo view
+   <old-owner>/<old-name>` must fail.
+3. **CODEOWNERS.** `.github/CODEOWNERS` must name a team or an account that
+   exists in the `hullwork` organisation with write access; an unresolvable
+   owner is ignored without a warning, and review requests stop being
+   assigned. Remove paths that no longer exist. The **Settings -> Code
+   review** page reports CODEOWNERS syntax errors.
+4. **Branch protection on `main`.** Require a pull request, require the CI
+   check, dismiss stale approvals, and block force pushes and deletion. The
+   release workflow refuses non-`main` commits; nothing else refuses a direct
+   push to `main`.
+5. **PyPI name.** `sandbox-platform` is unregistered on PyPI at the time of
+   writing and registration is first come, first served. Create the pending
+   publisher described in [One-time PyPI setup](#one-time-pypi-setup) before
+   announcing anything, so the first tag claims the name rather than
+   discovering someone else did.
+6. **Secret and history audit.** Run the full-history secret scan one last
+   time from a fresh clone and check `git log --all --format=%ae | sort -u`
+   lists only the intended author addresses. Force-pushing a rewritten
+   history after the repository is public is a breaking change for every fork.
+
 ## Maintainer procedure
 
 1. Make the repository public, set `project.version` in `pyproject.toml`, update

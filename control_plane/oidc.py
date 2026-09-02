@@ -29,6 +29,8 @@ from http.cookies import CookieError, SimpleCookie
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
 
+from .store import MANAGEMENT_TENANT
+
 
 STATE_COOKIE = "__Host-sandbox_console_oidc"
 CALLBACK_PATH = "/v1/auth/oidc/callback"
@@ -482,5 +484,10 @@ def role_of(config: Config, claims: dict[str, Any]) -> tuple[str, str | None]:
     if config.tenant_claim:
         tenant = claims.get(config.tenant_claim)
         if isinstance(tenant, str) and tenant.strip():
+            if tenant.strip() == MANAGEMENT_TENANT:
+                # The reserved management row is not a tenant a provider can
+                # map a person onto; a claim naming it is a misconfiguration
+                # (or a hostile IdP), not a sign-in.
+                raise OidcError("the tenant claim names the reserved management tenant")
             return "tenant", tenant.strip()
     raise OidcError("no Control Plane role is mapped to this identity")

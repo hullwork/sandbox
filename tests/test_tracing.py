@@ -277,14 +277,12 @@ class PublishedContractTests(unittest.TestCase):
         # them from suspecting their own query first. Each document is checked
         # against the words it actually uses rather than a normalized form -
         # the point is that a reader of *that* page is told.
-        for relative, phrase in (
-            ("docs/API.md", "no place to inject a header"),
-            ("README.md", "no header injection point"),
-        ):
+        for relative in ("docs/API.md", "README.md"):
             with self.subTest(document=relative):
                 text = (ROOT / relative).read_text(encoding="utf-8")
-                self.assertIn("`mc`", text)
-                self.assertIn(phrase, text)
+                self.assertIn("does not yet propagate `traceparent`", text)
+                self.assertIn("not traced yet", text)
+                self.assertNotIn("`mc` command-line client", text)
 
 
 PROBE = textwrap.dedent(

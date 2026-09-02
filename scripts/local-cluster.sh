@@ -137,7 +137,7 @@ ensure_cluster() {
   kubectl --context "$SANDBOX_KUBE_CONTEXT" taint nodes --all \
     node-role.kubernetes.io/control-plane- >/dev/null 2>&1 || true
   kubectl --context "$SANDBOX_KUBE_CONTEXT" label nodes --all \
-    sandbox.convee.io/node-role=runtime --overwrite >/dev/null
+    sandbox.hullwork.com/node-role=runtime --overwrite >/dev/null
   bash "$SCRIPT_DIR/install-gvisor-kubeadm.sh" "$VM_NAME"
   kubectl --context "$SANDBOX_KUBE_CONTEXT" wait node --all \
     --for=condition=Ready --timeout=5m
@@ -164,16 +164,30 @@ deploy_ceph_rgw() {
         pod-security.kubernetes.io/enforce=privileged \
         pod-security.kubernetes.io/enforce-version=latest \
     | kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -f -
-  helm repo add rook-release https://charts.rook.io/release --force-update >/dev/null
-  helm repo update rook-release >/dev/null
-  helm upgrade --install rook-ceph rook-release/rook-ceph \
-    --version "${ROOK_CEPH_CHART_VERSION:-v1.20.6}" \
+  # Pulled and checksummed like the Cilium chart, not installed straight from
+  # the repository index: the index is fetched over HTTPS but nothing else
+  # ties the tarball that arrives to the one that was reviewed.
+  local rook_version="${ROOK_CEPH_CHART_VERSION:-v1.20.6}"
+  local rook_sha256="${ROOK_CEPH_CHART_SHA256:-83a16ee19dd8d621df4159504b33585d80da1bf7ed83c734a9e8d4828c724353}"
+  local rook_dir rook_chart rook_actual
+  rook_dir="$(mktemp -d "${TMPDIR:-/tmp}/sandbox-rook-chart.XXXXXX")"
+  helm pull rook-ceph --repo https://charts.rook.io/release \
+    --version "$rook_version" --destination "$rook_dir"
+  rook_chart="$rook_dir/rook-ceph-$rook_version.tgz"
+  rook_actual="$(shasum -a 256 "$rook_chart" | awk '{print $1}')"
+  if [ "$rook_actual" != "$rook_sha256" ]; then
+    printf 'Rook chart checksum mismatch: expected %s, got %s\n' "$rook_sha256" "$rook_actual" >&2
+    rm -rf "$rook_dir"
+    return 1
+  fi
+  helm upgrade --install rook-ceph "$rook_chart" \
     --namespace rook-ceph \
     --kubeconfig "$SANDBOX_KUBECONFIG" \
     --set csi.installCsiOperator=true \
     --set enableDiscoveryDaemon=false \
     --set allowLoopDevices=true \
     --wait --timeout 10m
+  rm -rf "$rook_dir"
   kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -f "$REPO_ROOT/rook/loop-device.yaml"
   kubectl --context "$SANDBOX_KUBE_CONTEXT" -n rook-ceph rollout status \
     daemonset/rook-local-loop-device --timeout=5m

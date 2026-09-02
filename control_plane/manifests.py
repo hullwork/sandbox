@@ -104,14 +104,14 @@ def runtime_service_manifest(settings: ManifestSettings, sandbox_id: str) -> dic
             "namespace": settings.workload_namespace,
             "labels": {
                 "app.kubernetes.io/name": "sandbox-runtime",
-                "convee.io/sandbox-id": sandbox_id,
+                "sandbox.hullwork.com/sandbox-id": sandbox_id,
                 "app.kubernetes.io/managed-by": "sandbox-control-plane",
             },
         },
         "spec": {
             "selector": {
                 "app.kubernetes.io/name": "sandbox-runtime",
-                "convee.io/sandbox-id": sandbox_id,
+                "sandbox.hullwork.com/sandbox-id": sandbox_id,
             },
             "ports": [
                 {
@@ -142,11 +142,11 @@ def runtime_pod_manifest(
     created_at = int(time.time())
     labels = {
         "app.kubernetes.io/name": "sandbox-runtime",
-        "convee.io/sandbox-id": sandbox_id,
-        "convee.io/workspace-id": workspace_id,
+        "sandbox.hullwork.com/sandbox-id": sandbox_id,
+        "sandbox.hullwork.com/workspace-id": workspace_id,
         # Complete label instead of annotation: sandbox_view should read it back to tell the caller what is actually used
         # Which template (aligned with create's method of returning actual specifications), the list can also be filtered by template.
-        "convee.io/template": template_id,
+        "sandbox.hullwork.com/template": template_id,
         "app.kubernetes.io/managed-by": "sandbox-control-plane",
     }
     # Single tenant mode (tenant_id=None) does not even write the key, it is the same as the runtimeClassName
@@ -155,7 +155,7 @@ def runtime_pod_manifest(
     # Constraints: The value range is consistent with store.TENANT_ID (lowercase alphanumeric plus hyphen, ≤32), originally
     # Legal label value, no need to encode.
     if tenant_id:
-        labels["convee.io/tenant"] = tenant_id
+        labels["sandbox.hullwork.com/tenant"] = tenant_id
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -164,13 +164,13 @@ def runtime_pod_manifest(
             "namespace": settings.workload_namespace,
             "labels": labels,
             "annotations": {
-                "convee.io/created-at": str(created_at),
+                "sandbox.hullwork.com/created-at": str(created_at),
                 # Absolute upper limit, nailed on creation. touch_runtime only pushes expires-at,
                 # Never touch this one - it's the ceiling for how long an active review can last.
-                "convee.io/hard-expires-at": str(
+                "sandbox.hullwork.com/hard-expires-at": str(
                     created_at + settings.runtime_hard_ttl_seconds
                 ),
-                "convee.io/expires-at": str(
+                "sandbox.hullwork.com/expires-at": str(
                     created_at + settings.runtime_ttl_seconds
                 ),
             },

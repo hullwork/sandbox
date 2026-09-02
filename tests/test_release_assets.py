@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import tempfile
 import tomllib
 import unittest
+
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
@@ -16,25 +21,98 @@ assert SPEC and SPEC.loader
 release_assets = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release_assets)
 
+RELEASE_WORKFLOW = yaml.safe_load(
+    (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+)
+IMAGE_JOB = RELEASE_WORKFLOW["jobs"]["images"]
+RECORD_STEP = next(
+    step for step in IMAGE_JOB["steps"]
+    if step.get("name") == "Record deployable image identity"
+)
+DIGEST = "sha256:" + ("a" * 64)
+
+
+def workflow_image_names() -> list[str]:
+    return [entry["name"] for entry in IMAGE_JOB["strategy"]["matrix"]["include"]]
+
+
+def record_image_identity(component: str, directory: pathlib.Path) -> None:
+    """Write image-<component>.json the way the release workflow does.
+
+    The fixture used to be typed out to match the script, and the script was
+    read against it: green for a workflow that wrote a different key and a
+    different file name, and a release that failed on its final job. So the
+    workflow's own step is what writes the file here. With bash and jq on
+    PATH that is the literal `run:` block; otherwise the jq filter is lifted
+    out of it and evaluated by hand, which still fails on a renamed key.
+    """
+    environment = {
+        **os.environ,
+        "COMPONENT": component,
+        "IMAGE": f"ghcr.io/hullwork/sandbox-{component}",
+        "DIGEST": DIGEST,
+    }
+    if shutil.which("bash") and shutil.which("jq"):
+        subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", RECORD_STEP["run"]],
+            cwd=directory, env=environment, check=True,
+            capture_output=True, text=True,
+        )
+        return
+    # jq -n --arg a "$A" ... '{k:$a,...,immutableRef:($repository+"@"+$digest)}'
+    match = re.search(
+        r"jq -n((?:\s+--arg \w+ \"\$\w+\"\s*\\?)+)\s*'(\{.*?\})'\s*\\?\s*>\"(.*?)\"",
+        RECORD_STEP["run"], re.S,
+    )
+    assert match, "the jq invocation is not where this fallback looks"
+    arguments = dict(re.findall(r'--arg (\w+) "\$(\w+)"', match.group(1)))
+    values = {
+        name: (
+            {"runtime": "images.runtime", "file-service": "images.fileService",
+             "control-plane": "images.controlPlane", "console": "images.console"}[component]
+            if variable == "value_path" else environment[variable]
+        )
+        for name, variable in arguments.items()
+    }
+    record = {}
+    for key, expression in re.findall(r"(\w+):(\$\w+|\([^)]*\))", match.group(2)):
+        if expression.startswith("$"):
+            record[key] = values[expression[1:]]
+        else:
+            record[key] = "".join(
+                values[part[1:]] if part.startswith("$") else json.loads(part)
+                for part in re.findall(r'\$\w+|"[^"]*"', expression)
+            )
+    target = match.group(3).replace("${COMPONENT}", component)
+    (directory / target).write_text(json.dumps(record), encoding="utf-8")
+
 
 class ReleaseManifestTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = pathlib.Path(self.temporary.name)
-        for component in release_assets.COMPONENT_IMAGES:
-            (self.root / f"image-{component}.json").write_text(
-                json.dumps(
-                    {
-                        "component": component,
-                        "image": f"ghcr.io/hullwork/sandbox-{component}",
-                        "digest": "sha256:" + ("a" * 64),
-                    }
-                ),
-                encoding="utf-8",
-            )
+        for component in workflow_image_names():
+            record_image_identity(component, self.root)
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_script_components_are_the_workflow_matrix_names(self) -> None:
+        # Both evidence files are named after matrix.name; a key here that is
+        # not a matrix name is a FileNotFoundError on tag day.
+        self.assertEqual(
+            sorted(release_assets.COMPONENT_IMAGES), sorted(workflow_image_names())
+        )
+
+    def test_workflow_written_identities_are_accepted(self) -> None:
+        identities = release_assets.load_image_identities(self.root)
+        self.assertEqual(
+            identities,
+            {
+                name: f"ghcr.io/hullwork/sandbox-{name}@{DIGEST}"
+                for name in workflow_image_names()
+            },
+        )
 
     def test_manifest_uses_release_digests_for_workloads_and_runtime_env(self) -> None:
         manifest_input = self.root / "base.yaml"
@@ -69,7 +147,7 @@ spec:
         release_assets.render_manifest(manifest_input, manifest_output, identities)
         rendered = manifest_output.read_text(encoding="utf-8")
         self.assertNotIn("sandbox-control-plane:0.7.0", rendered)
-        self.assertEqual(rendered.count("@sha256:" + ("a" * 64)), 4)
+        self.assertEqual(rendered.count("@" + DIGEST), 4)
         self.assertNotIn("imagePullPolicy: Never", rendered)
         self.assertEqual(rendered.count("imagePullPolicy: IfNotPresent"), 4)
 
@@ -82,7 +160,7 @@ class ReleaseInventoryTests(unittest.TestCase):
                 json.dumps({"format": "v1", "python": [], "npm": [], "images": []}),
                 encoding="utf-8",
             )
-            for component in release_assets.COMPONENT_IMAGES:
+            for component in workflow_image_names():
                 (root / f"image-{component}.cdx.json").write_text(
                     json.dumps(
                         {
@@ -124,6 +202,25 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assertIn("repository is public", release)
         self.assertIn("prepare_release_assets.py", release)
         self.assertIn("--draft", release)
+
+    def test_release_assets_are_enumerated_as_files_from_one_flat_artifact(self) -> None:
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        chart_job = RELEASE_WORKFLOW["jobs"]["helm-chart"]
+        upload = next(
+            step for step in chart_job["steps"]
+            if step.get("uses", "").startswith("actions/upload-artifact@")
+        )
+        # One common ancestor, so download-artifact lays the files out flat.
+        parents = {pathlib.PurePosixPath(line).parent for line in upload["with"]["path"].split()}
+        self.assertEqual(parents, {pathlib.PurePosixPath("chart-dist")})
+        publish = next(
+            step["run"] for step in RELEASE_WORKFLOW["jobs"]["github-release"]["steps"]
+            if step.get("name") == "Publish immutable-tag release assets"
+        )
+        self.assertNotIn("release/*", publish)
+        self.assertIn("find release -type f -print0", publish)
+        self.assertIn('"${assets[@]}"', publish)
+        self.assertNotIn("-maxdepth 1", release)
 
     def test_release_scans_before_promoting_official_image_tags(self) -> None:
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")

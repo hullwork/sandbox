@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -15,12 +16,19 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DOCTOR_TOOLS = ("docker", "limactl", "kubectl", "helm", "openssl")
+# Linux is where Lima has only the qemu vmType, so the doctor demands the
+# host architecture's emulator there, plus the shasum both chart installers
+# verify with. Neither is asked for on macOS.
+LINUX_ONLY_DOCTOR_TOOLS = (f"qemu-system-{platform.machine()}", "shasum")
 
 
-def fake_tool_directory(directory: str) -> str:
+def fake_tool_directory(directory: str, *, omit: tuple[str, ...] = ()) -> str:
     # Stand-ins for the host tools so the doctor's resource gate can be
     # exercised on a machine that has none of them installed.
-    for name in DOCTOR_TOOLS:
+    names = DOCTOR_TOOLS + (LINUX_ONLY_DOCTOR_TOOLS if platform.system() == "Linux" else ())
+    for name in names:
+        if name in omit:
+            continue
         tool = pathlib.Path(directory) / name
         tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         tool.chmod(0o755)
@@ -281,6 +289,55 @@ class DevelopmentScriptTests(unittest.TestCase):
             if platform.system() == "Linux" and not os.path.exists("/dev/kvm"):
                 self.assertIn("/dev/kvm is missing", skipped.stderr)
                 self.assertIn("QEMU TCG", skipped.stderr)
+
+    def test_doctor_on_linux_demands_the_qemu_emulator_and_shasum(self) -> None:
+        # `limactl start` on Linux fails without qemu-system-<arch>, and
+        # install-cilium-kubeadm.sh without shasum; the doctor used to pass
+        # with both missing, which is the one outcome a doctor must not have.
+        if platform.system() != "Linux":
+            self.skipTest("Lima uses the Virtualization framework off Linux")
+        for missing in LINUX_ONLY_DOCTOR_TOOLS:
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                # PATH holds only the fakes: the real tool may exist on the host.
+                environment = {
+                    **os.environ,
+                    "PATH": f"{fake_tool_directory(directory, omit=(missing,))}{os.pathsep}/nonexistent",
+                    "SANDBOX_DOCTOR_SKIP_RESOURCES": "1",
+                }
+                # python3 and bash still have to resolve for the script to run.
+                for real in ("python3", "bash", "uname"):
+                    target = shutil.which(real)
+                    self.assertTrue(target, real)
+                    os.symlink(target, pathlib.Path(directory) / real)
+                result = subprocess.run(
+                    ["bash", str(ROOT / "scripts/dev-doctor.sh")],
+                    cwd=ROOT, env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn(f"missing required commands: {missing}", result.stderr)
+                self.assertNotIn("prerequisites are ready", result.stdout)
+
+    def test_rook_chart_is_pulled_and_checksummed_like_cilium(self) -> None:
+        script = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
+        cilium = (ROOT / "scripts/install-cilium-kubeadm.sh").read_text(encoding="utf-8")
+        self.assertNotIn("helm repo add rook-release", script)
+        self.assertIn("helm pull rook-ceph --repo https://charts.rook.io/release", script)
+        self.assertRegex(script, r"ROOK_CEPH_CHART_SHA256:-[0-9a-f]{64}\}")
+        self.assertIn("Rook chart checksum mismatch", script)
+        # Same tool as the Cilium installer, so the doctor's shasum check
+        # covers both.
+        self.assertIn("shasum -a 256", cilium)
+        self.assertIn("shasum -a 256", script)
+
+    def test_ceph_image_is_digest_pinned_and_identical_in_both_rook_manifests(self) -> None:
+        images = set()
+        for relative in ("rook/cluster-local.yaml", "rook/loop-device.yaml"):
+            text = (ROOT / relative).read_text(encoding="utf-8")
+            found = re.findall(r"image: (quay\.io/ceph/ceph\S+)", text)
+            self.assertEqual(len(found), 1, relative)
+            self.assertRegex(found[0], r"@sha256:[0-9a-f]{64}$", relative)
+            images.add(found[0])
+        self.assertEqual(len(images), 1, "the two Rook manifests must move together")
 
     def test_make_dev_token_outputs_only_the_decoded_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

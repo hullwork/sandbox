@@ -3,6 +3,9 @@
 /contracts/ @convee
 /k8s/ @convee
 /overlays/ @convee
-/portal/ @convee
+/control_plane/ @convee
+/console/ @convee
+/file-service/ @convee
+/charts/ @convee
 /runtime/ @convee
 /.github/workflows/ @convee

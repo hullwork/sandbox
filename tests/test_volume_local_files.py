@@ -21,9 +21,12 @@ from __future__ import annotations
 import importlib
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -282,6 +285,132 @@ class LocalReadTests(WorkspaceFixture):
             volume.local_read_file(self.workspace, "src")
 
 
+class LocalWriteTests(WorkspaceFixture):
+    def test_a_write_creates_missing_directories_and_reports_sizes(self) -> None:
+        result = volume.local_write_file(
+            self.workspace, {"path": "a/b/c.txt", "content": "héllo\n"}
+        )
+        self.assertEqual(
+            (self.ws_dir / "a" / "b" / "c.txt").read_text(encoding="utf-8"),
+            "héllo\n",
+        )
+        self.assertEqual(result["path"], "a/b/c.txt")
+        self.assertEqual(result["chars"], 6)
+        self.assertEqual(result["bytes"], 7)
+        # No temporary left behind next to the file.
+        self.assertEqual(
+            sorted(p.name for p in (self.ws_dir / "a" / "b").iterdir()), ["c.txt"]
+        )
+
+    def test_an_overwrite_replaces_the_content_whole(self) -> None:
+        volume.local_write_file(
+            self.workspace, {"path": "src/main.py", "content": "new\n"}
+        )
+        self.assertEqual(
+            (self.ws_dir / "src" / "main.py").read_text(encoding="utf-8"), "new\n"
+        )
+
+    def test_a_directory_is_not_writable_as_a_file(self) -> None:
+        with self.assertRaisesRegex(ValueError, "path is not a file"):
+            volume.local_write_file(self.workspace, {"path": "src", "content": ""})
+
+    def test_a_link_that_stays_inside_is_written_through(self) -> None:
+        # The no-follow walk uses the resolved components, so a link that
+        # pointed inside the workspace when it was checked still works.
+        (self.ws_dir / "inside").symlink_to(self.ws_dir / "src")
+        volume.local_write_file(
+            self.workspace, {"path": "inside/new.txt", "content": "x"}
+        )
+        self.assertEqual(
+            (self.ws_dir / "src" / "new.txt").read_text(encoding="utf-8"), "x"
+        )
+
+
+class SymlinkRaceTests(WorkspaceFixture):
+    """The gap between local_safe_path's verdict and the open.
+
+    The volume role sees every Workspace on the volume, with the same uid the
+    tenant's shell runs as. A tenant who swaps a directory of theirs for a
+    link into a sibling Workspace *after* the path was resolved and verified
+    would, on a string-addressed open, write into or read from that sibling.
+    The swap is done here deterministically, inside a wrapper around the
+    check, and the criterion is what happened in the sibling: nothing.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.other = self.root / "ws-000000000002"
+        self.other.mkdir()
+        (self.ws_dir / "d").mkdir()
+
+    def flipped_after_check(self, relative: str = "d", target: str = ""):
+        """Swap ``relative`` for a link to ``target`` in the sibling, right after the check."""
+        real = volume.local_safe_path
+
+        def check_then_flip(*args, **kwargs):
+            result = real(*args, **kwargs)
+            link = self.ws_dir / relative
+            if not link.is_symlink():
+                if link.is_dir():
+                    shutil.rmtree(link)
+                else:
+                    link.unlink()
+                link.symlink_to(pathlib.Path("../" * len(link.relative_to(self.ws_dir).parts)) / self.other.name / target)
+            return result
+
+        return mock.patch.object(volume, "local_safe_path", check_then_flip)
+
+    def test_a_directory_swapped_for_a_link_after_the_check_is_not_written_through(
+        self,
+    ) -> None:
+        with self.flipped_after_check():
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                volume.local_write_file(
+                    self.workspace, {"path": "d/x", "content": "planted"}
+                )
+        self.assertTrue((self.ws_dir / "d").is_symlink())
+        self.assertEqual(sorted(p.name for p in self.other.iterdir()), [])
+
+    def test_a_directory_swapped_for_a_link_after_the_check_is_not_read_through(
+        self,
+    ) -> None:
+        (self.other / "x").write_text("the sibling's secret", encoding="utf-8")
+        (self.ws_dir / "d" / "x").write_text("mine", encoding="utf-8")
+        with self.flipped_after_check():
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                volume.local_read_file(self.workspace, "d/x")
+
+    def test_a_file_swapped_for_a_link_after_the_check_is_not_written_through(
+        self,
+    ) -> None:
+        (self.other / "x").write_text("theirs", encoding="utf-8")
+        (self.ws_dir / "d" / "x").write_text("mine", encoding="utf-8")
+        with self.flipped_after_check("d/x", "x"):
+            with self.assertRaisesRegex(ValueError, "path is not a file"):
+                volume.local_write_file(
+                    self.workspace, {"path": "d/x", "content": "planted"}
+                )
+        self.assertEqual((self.other / "x").read_text(encoding="utf-8"), "theirs")
+
+    def test_a_file_swapped_for_a_link_after_the_check_is_not_read_through(
+        self,
+    ) -> None:
+        (self.other / "x").write_text("the sibling's secret", encoding="utf-8")
+        (self.ws_dir / "d" / "x").write_text("mine", encoding="utf-8")
+        with self.flipped_after_check("d/x", "x"):
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                volume.local_read_file(self.workspace, "d/x")
+
+    def test_a_link_present_at_check_time_is_refused_by_the_static_check(self) -> None:
+        # The first line of defence, kept: local_safe_path resolves and
+        # re-verifies, so a link that already points out never gets this far.
+        shutil.rmtree(self.ws_dir / "d")
+        (self.ws_dir / "d").symlink_to(pathlib.Path("..") / self.other.name)
+        with self.assertRaisesRegex(ValueError, "path escapes workspace"):
+            volume.local_write_file(self.workspace, {"path": "d/x", "content": "planted"})
+        self.assertEqual(sorted(p.name for p in self.other.iterdir()), [])
+
+
 class VolumeAbsentTests(unittest.TestCase):
     def test_workspace_dir_reports_offline_when_no_volume_is_mounted(self) -> None:
         previous = core.WORKSPACE_VOLUME_ROOT
@@ -289,6 +418,58 @@ class VolumeAbsentTests(unittest.TestCase):
         core.WORKSPACE_VOLUME_ROOT = ""
         with self.assertRaises(core.WorkspaceOffline):
             volume.workspace_dir(WORKSPACE)
+
+
+class LocalActivityMarkerTests(WorkspaceFixture):
+    """The volume role writes ``.sandbox/last_used_at`` on its own reads and writes.
+
+    ``gc_workspaces.py`` reads that marker and falls back to the directory's
+    mtime without it. Only file-service wrote it, and file-service runs inside
+    a Runtime, so a Workspace served purely through the volume role had no
+    marker, and writes inside subdirectories do not move the root's mtime: the
+    CronJob would delete a Workspace in daily use thirty days after creation.
+    """
+
+    def marker(self) -> int:
+        return int((self.ws_dir / ".sandbox" / "last_used_at").read_text(encoding="ascii"))
+
+    def test_a_write_records_activity(self) -> None:
+        self.assertFalse((self.ws_dir / ".sandbox" / "last_used_at").exists())
+        volume.local_write_file(self.workspace, {"path": "src/new.py", "content": "x"})
+        self.assertAlmostEqual(self.marker(), int(time.time()), delta=5)
+
+    def test_a_read_records_activity(self) -> None:
+        volume.local_read_file(self.workspace, "src/main.py")
+        self.assertAlmostEqual(self.marker(), int(time.time()), delta=5)
+
+    def test_a_stale_marker_is_moved_forward(self) -> None:
+        (self.ws_dir / ".sandbox" / "last_used_at").write_text("1000\n", encoding="ascii")
+        volume.local_read_file(self.workspace, "src/main.py")
+        self.assertGreater(self.marker(), 1000)
+
+    def test_a_failed_read_does_not_touch_the_marker(self) -> None:
+        with self.assertRaises(ValueError):
+            volume.local_read_file(self.workspace, "src/missing.py")
+        self.assertFalse((self.ws_dir / ".sandbox" / "last_used_at").exists())
+
+
+class AdmissionCountTests(WorkspaceFixture):
+    """Quota counts Workspace directories, with the same filter the listing uses."""
+
+    def test_directories_that_are_not_workspaces_take_no_slot(self) -> None:
+        (self.root / "lost+found").mkdir()
+        (self.root / "not-a-workspace").mkdir()
+        # One real Workspace exists (the fixture's); maximum=2 leaves one slot,
+        # which the two stray directories must not have used up.
+        result = volume.local_admit_workspace("ws-fedcba987654", 2)
+        self.assertTrue(result["created"])
+        self.assertTrue((self.root / "ws-fedcba987654").is_dir())
+
+    def test_the_quota_still_bites_on_real_workspaces(self) -> None:
+        (self.root / "ws-fedcba987654").mkdir()
+        with self.assertRaises(core.KubeError):
+            volume.local_admit_workspace("ws-0000000000ff", 2)
+        self.assertFalse((self.root / "ws-0000000000ff").exists())
 
 
 if __name__ == "__main__":

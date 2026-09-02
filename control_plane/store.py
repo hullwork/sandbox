@@ -56,6 +56,15 @@ GLOBAL_TENANT = "*"
 # rather than NULL for the same reason as GLOBAL_TENANT (tenant_id is part of the composite primary key of
 # sandbox_runtimes). '-' cannot collide with a real tenant name: TENANT_ID requires the first character to be [a-z0-9].
 UNTENANTED_RUNTIME = "-"
+# The reserved tenant row the unscoped management-plane identity is filed under
+# (ApiHandler.ensure_management_tenant). It matches TENANT_ID on purpose - it
+# is a real row so capability epochs can be revoked - so the name has to be
+# refused everywhere a caller could pick a tenant id: create_tenant,
+# issue_api_key, X-Sandbox-Tenant / session tenant (_assume_tenant) and the
+# OIDC tenant claim (oidc.role_of). Without that, whoever registers a tenant
+# called "management" owns every workspace and runtime the management plane
+# created, and can shrink the management plane's quota to any value.
+MANAGEMENT_TENANT = "management"
 # The minimum **shape** of an image reference. The real admission rule is the Control Plane's prefix whitelist, which is
 # only known at deployment time (environment variables); the store layer does not repeat it and only rejects the
 # bytes that would corrupt the Pod spec and logs - same reasoning as FREEFORM. The upper bound is 256: a
@@ -714,8 +723,30 @@ class Store:
                 "tenant id must match ^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$ "
                 "(the value is also used as a Kubernetes label)"
             )
+        if tenant_id == MANAGEMENT_TENANT:
+            raise StoreError(f"tenant id is reserved: {tenant_id}")
         if max_workspaces < 1 or max_runtimes < 1:
             raise StoreError("quotas must be positive")
+        return self._insert_tenant(
+            tenant_id, display_name, max_workspaces, max_runtimes
+        )
+
+    def create_management_tenant(self) -> Tenant:
+        """The only way the reserved row gets created; create_tenant refuses the name."""
+        return self._insert_tenant(
+            MANAGEMENT_TENANT,
+            "Reserved management-plane identity",
+            1024,
+            1024,
+        )
+
+    def _insert_tenant(
+        self,
+        tenant_id: str,
+        display_name: str,
+        max_workspaces: int,
+        max_runtimes: int,
+    ) -> Tenant:
         with self._cursor() as cursor:
             cursor.execute(
                 self._sql(
@@ -792,6 +823,11 @@ class Store:
         now: int | None = None,
     ) -> tuple[str, ApiKey]:
         """Issue a key. Returns (plaintext, record) - the plaintext is never retrievable again."""
+        if tenant_id == MANAGEMENT_TENANT:
+            # A key scoped to the reserved row would be a tenant credential
+            # over everything the management plane owns; the management plane
+            # is an admin key (tenant_id None), never a tenant key.
+            raise StoreError(f"tenant id is reserved: {tenant_id}")
         granted = frozenset(permissions)
         unknown = sorted(granted - KEY_PERMISSIONS)
         if unknown:
@@ -1132,6 +1168,30 @@ class Store:
                 else WORKSPACE_AT_CAPACITY
             )
 
+    def touch_workspace(self, workspace_id: str) -> None:
+        """Record one use of a Workspace, writing at most once per TOUCH_THROTTLE_SECONDS.
+
+        Same shape as touch_api_key: the throttle lives in the WHERE, so under a polling client the vast
+        majority of calls change no row, and a call inside the window loses nothing - last_used_at means
+        "recently used" and the idle verdict (idle_workspaces) is measured in hours.
+
+        🔴 Why this exists: admit_workspace used to be the **only** writer of last_used_at, and only
+           `POST /v1/workspaces` calls it. A client that took its lease once and then only ever talked to the
+           Runtime (files, objects, checkpoints, MCP) never refreshed the column, so the round in which its
+           Runtime hit the hard TTL also swept the Workspace - hours of work gone while the user was active
+           minutes earlier. Every route that proves ownership of a Workspace and then acts on it calls this.
+        Constraint: a soft-deleted row is never revived by a touch; a stale request for a reclaimed Workspace
+             must not make it look alive again."""
+        with self._cursor() as cursor:
+            cursor.execute(
+                self._sql(
+                    "UPDATE sandbox_workspaces SET last_used_at = {now} "
+                    "WHERE workspace_id = {ph} AND deleted_at IS NULL "
+                    "AND last_used_at < {stale}"
+                ),
+                (workspace_id,),
+            )
+
     def owner_of(self, workspace_id: str) -> str | None:
         """Which tenant owns this Workspace? Asked on the authentication path."""
         with self._cursor() as cursor:
@@ -1176,7 +1236,7 @@ class Store:
             cursor.execute(
                 self._sql(
                     "SELECT tenant_id, workspace_id, principal_kind, principal_id, "
-                    f"session_key FROM sandbox_workspaces WHERE deleted_at IS NULL {clause} "
+                    f"session_key, last_used_at FROM sandbox_workspaces WHERE deleted_at IS NULL {clause} "
                     "ORDER BY tenant_id, workspace_id"
                 ),
                 params,
@@ -1189,6 +1249,11 @@ class Store:
                 "principal_kind": row[2],
                 "principal_id": row[3],
                 "session_key": row[4],
+                # Epoch seconds as a string, the spelling the volume markers use, so
+                # workspace_view can take either source without a second format.
+                # This column is the reclaim criterion (idle_workspaces); the marker on
+                # the volume is not.
+                "last_used_at": _epoch_seconds(row[5]),
             }
             for row in rows
         ]
@@ -1858,6 +1923,25 @@ def _json_timestamp(value: Any) -> Any:
     if isinstance(value, (datetime.datetime, datetime.date)):
         return value.isoformat()
     return value
+
+
+def _epoch_seconds(value: Any) -> str | None:
+    """A stored timestamp as Unix epoch seconds in string form, or None when it cannot be read.
+
+    SQLite hands back 'YYYY-MM-DD HH:MM:SS' text in UTC, psycopg a tz-aware datetime, MySQL a naive
+    datetime that UTC_TIMESTAMP() wrote - a naive value is therefore UTC here, never local time."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return str(int(value.timestamp()))
+    return None
 
 
 def _template_from_row(row: Any) -> dict[str, Any]:
