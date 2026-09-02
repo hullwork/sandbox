@@ -63,9 +63,9 @@ gVisor Runtime.
 
 **Status: alpha (`0.1.0`).** `main` is the only channel and not a stability
 promise — [Known limitations](#known-limitations) is deliberately specific.
-**One of four.** [`hullwork/platform-composition`](https://github.com/hullwork/platform-composition)
-is where the four repositories are described together; this one is about Sandbox
-Platform alone.
+**Self-contained.** This repository is the whole product: it depends on no other
+repository, and other products integrate with it as an external tenant through the
+API keys and contracts documented here.
 
 ---
 
