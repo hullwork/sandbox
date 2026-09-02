@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import tempfile
+import tomllib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -151,14 +152,28 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             ci,
         )
         self.assertNotIn("gitleaks/gitleaks-action", ci)
-        exceptions = [
-            line for line in (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
-            if line and not line.startswith("#")
-        ]
-        self.assertEqual(exceptions, [
-            "91c0ee2192d9b8e2ea1223ff9a77e633b9c3821e:"
-            "tests/test_api_authorization.py:generic-api-key:267"
-        ])
+        self.assertIn("-c .gitleaks.toml", ci)
+
+        # The exemption used to live in .gitleaksignore, keyed by commit SHA and
+        # line number. Squashing the history changed both and the entry stopped
+        # applying, so the scan failed on main while the file still looked like
+        # it was covering the finding. Assert it stays gone: a stale fingerprint
+        # is worse than none, because it reads as an exemption that works.
+        self.assertFalse((ROOT / ".gitleaksignore").exists())
+
+        config = tomllib.loads((ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+        self.assertIs(config["extend"]["useDefault"], True)
+        allowlists = config["allowlists"]
+        self.assertEqual(len(allowlists), 1)
+        only = allowlists[0]
+        # All three clauses together are what makes this a fixture exception
+        # rather than a hole: the rule, the one file, and the exact placeholder.
+        # Dropping any one of them would exempt something nobody looked at.
+        self.assertEqual(only["condition"], "AND")
+        self.assertEqual(only["targetRules"], ["generic-api-key"])
+        self.assertEqual(only["paths"], [r"^tests/test_api_authorization\.py$"])
+        self.assertEqual(only["regexTarget"], "secret")
+        self.assertEqual(only["regexes"], ["^sb-0123456789ab$"])
 
     def test_lima_uses_an_immutable_ubuntu_image_url(self) -> None:
         lima = (ROOT / "scripts/local-cluster.yaml").read_text(encoding="utf-8")
