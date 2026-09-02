@@ -1007,14 +1007,50 @@ class ObjectStoreUnavailable(ObjectStoreBusy):
        Endpoints, and those routes must give a "retryable" answer themselves."""
 
 
+#: Per-thread marker: "this thread already holds a queue slot through object_queue_slot".
+_OBJECT_GATE_LOCAL = threading.local()
+
+
+@contextlib.contextmanager
+def object_queue_slot() -> Any:
+    """Hold a queue slot for a whole request, body included, not only for the store call.
+
+    🔴 Why this exists: the three paths that spool a large body to /tmp (ticket upload, workspace
+       export archive, checkpoint) used to read the whole body **first** and only then enter the gate
+       inside object_put. SANDBOX_MAX_OBJECT_QUEUE therefore bounded nothing about the spooling itself:
+       ThreadingHTTPServer has no thread cap, so N concurrent 64MiB uploads meant N × 64MiB on the tmp
+       emptyDir before any of them was refused. The emptyDir has a sizeLimit, and the kubelet's answer
+       to exceeding it is to evict the whole Pod - single replica, reaper included.
+       Taking the queue slot before the first body byte turns the N+1-th request into a 503 with nothing
+       spooled, and makes `MAX_OBJECT_QUEUE × MAX_STREAM_OBJECT_BYTES` the real ceiling on /tmp use,
+       which is what the manifests size the volume to.
+    Constraint: the store call inside still goes through object_slot, which sees the marker and does not
+         take a second queue slot (it would count one request twice and refuse at half the depth); it
+         does take the execution slot as usual. object_slot nested in object_slot is **not** made
+         re-entrant by this - that is a different situation and must keep refusing."""
+    if getattr(_OBJECT_GATE_LOCAL, "queued", False):
+        yield
+        return
+    if not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
+        raise ObjectStoreBusy("object storage is busy; retry shortly")
+    _OBJECT_GATE_LOCAL.queued = True
+    try:
+        yield
+    finally:
+        _OBJECT_GATE_LOCAL.queued = False
+        _OBJECT_QUEUE_SLOTS.release()
+
+
 @contextlib.contextmanager
 def object_slot() -> Any:
     """Enter the object-operation gate. When the queue is full, fail immediately instead of waiting.
 
     Constraint: the order of the two gates cannot be reversed - take the queue slot first, then the execution slot. The other way round, the thread blocks
-         on the execution slot first and the queue slot is useless."""
+         on the execution slot first and the queue slot is useless.
+    A thread already queued through object_queue_slot keeps that slot and takes only the execution slot."""
     global _OBJECT_INFLIGHT
-    if not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
+    queued_here = not getattr(_OBJECT_GATE_LOCAL, "queued", False)
+    if queued_here and not _OBJECT_QUEUE_SLOTS.acquire(blocking=False):
         raise ObjectStoreBusy("object storage is busy; retry shortly")
     with _OBJECT_INFLIGHT_LOCK:
         _OBJECT_INFLIGHT += 1
@@ -1024,7 +1060,8 @@ def object_slot() -> Any:
     finally:
         with _OBJECT_INFLIGHT_LOCK:
             _OBJECT_INFLIGHT -= 1
-        _OBJECT_QUEUE_SLOTS.release()
+        if queued_here:
+            _OBJECT_QUEUE_SLOTS.release()
 _RUNTIME_ADMISSION_LOCK = threading.Lock()
 TICKET_LEASE_SELECTOR = "convee.io/purpose=object-ticket"
 
@@ -2138,7 +2175,8 @@ def put_object_bytes(
         str(expected_digest), digest
     ):
         raise ValueError("sha256 does not match content")
-    with tempfile.SpooledTemporaryFile(
+    # The queue slot is taken before anything touches /tmp; see object_queue_slot.
+    with object_queue_slot(), tempfile.SpooledTemporaryFile(
         max_size=1024 * 1024,
         mode="w+b",
         dir="/tmp",
@@ -2588,6 +2626,13 @@ def checkpoint_workspace(workspace_id: str) -> dict[str, Any]:
     if not WORKSPACE_ID.fullmatch(workspace_id):
         raise ValueError("invalid workspace_id")
     sandbox_id = require_runtime_for(workspace_id, "checkpoint")
+    # The archive is read into memory by internal_http and then spooled; both must
+    # sit inside the queue slot or the gate bounds neither (object_queue_slot).
+    with object_queue_slot():
+        return _checkpoint_workspace_gated(workspace_id, sandbox_id)
+
+
+def _checkpoint_workspace_gated(workspace_id: str, sandbox_id: str) -> dict[str, Any]:
     status, archive, content_type = internal_http(
         "GET",
         f"{runtime_endpoint(sandbox_id)}/v1/files/checkpoint",

@@ -1596,11 +1596,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             raise ValueError("object exceeds ticket size limit")
         digest = hashlib.sha256()
-        with tempfile.SpooledTemporaryFile(
-            max_size=1024 * 1024,
-            mode="w+b",
-            dir="/tmp",
-        ) as upload:
+        with contextlib.ExitStack() as stack:
+            try:
+                stack.enter_context(control_plane.object_queue_slot())
+            except control_plane.ObjectStoreBusy:
+                # Refused before the first body byte: nothing is spooled, and
+                # the unread body means this connection cannot be reused.
+                self.close_connection = True
+                raise
+            upload = stack.enter_context(
+                tempfile.SpooledTemporaryFile(
+                    max_size=1024 * 1024,
+                    mode="w+b",
+                    dir="/tmp",
+                )
+            )
             remaining = length
             while remaining:
                 chunk = self.rfile.read(min(1024 * 1024, remaining))
