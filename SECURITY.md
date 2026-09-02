@@ -8,6 +8,8 @@ Security fixes target the latest published release and current `main`. Historica
 
 Use the repository's GitHub private vulnerability reporting form. Do not open a public issue for vulnerabilities.
 
+If the form is unavailable, email the maintainers at `<MAINTAINER_SECURITY_EMAIL>` with the same information; encrypt anything sensitive and expect a reply from the same address.
+
 Include the commit, affected component, impact on workspace isolation or credential scope, reproduction steps, and logs with secrets removed. Maintainers aim to acknowledge reports within five business days.
 
 ## Security boundary

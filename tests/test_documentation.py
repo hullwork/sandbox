@@ -87,31 +87,29 @@ class DocumentationTests(unittest.TestCase):
         for name, text in sources.items():
             self.assertNotIn(wrong, text, f"{name} uses the in-tree import")
 
-    def test_readme_names_and_links_the_composition_repository(self) -> None:
-        """The pointer to the repository that describes all four must survive.
+    def test_docs_do_not_point_at_sibling_repositories(self) -> None:
+        """This repository is released on its own and documents itself.
 
-        This repository documents itself and deliberately does not restate the
-        cross-repository picture, so the pointer is the only thing connecting a
-        reader to it.  A rename on the other side, or an edit that drops the
-        paragraph, would otherwise leave that reader with nothing and produce
-        no signal here.
-
-        IMPORTANT: this reads a literal in this repository's own README and
-        nothing else.  Whether the link resolves, whether the target repository
-        exists, and whether it is public are not observable from inside this
-        tree; a gate that implied otherwise would be trusted and would be
-        wrong.  Cross-repository link health needs a check that can reach the
-        other side.
+        It once carried a pointer to a composition repository that described
+        four repositories together. That is no longer the model: nothing here
+        depends on another repository, and other products integrate with this
+        one as an external tenant. A link to a sibling would send a reader to
+        something private or gone, so README and docs/ may name none of them.
+        Test sources are not covered: a comment explaining history is fine.
         """
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        # A rename changes the slug; a reader clicks the URL. Each is asserted
-        # with its own terminator - backticks, and the closing parenthesis of
-        # the Markdown link - because a bare substring stays green through the
-        # rename that matters most: "hullwork/platform-composition-v2" contains
-        # "hullwork/platform-composition". Same shape as an unanchored pattern
-        # matching inside a longer word.
-        self.assertIn("`hullwork/platform-composition`", readme)
-        self.assertIn("](https://github.com/hullwork/platform-composition)", readme)
+        forbidden = (
+            "platform-composition",
+            "hullwork/agent",
+            "hullwork/site",
+            "hullwork/infra",
+        )
+        offenders: list[str] = []
+        for path in [ROOT / "README.md", *sorted((ROOT / "docs").rglob("*.md"))]:
+            text = path.read_text(encoding="utf-8")
+            for needle in forbidden:
+                if needle in text:
+                    offenders.append(f"{path.relative_to(ROOT)}: {needle}")
+        self.assertEqual(offenders, [])
 
     def test_contributor_clone_path_matches_this_repository(self) -> None:
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")

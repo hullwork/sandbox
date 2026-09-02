@@ -113,7 +113,7 @@ parse it to decide anything**. The authoritative answer to "what is this
 credential" is `GET /v1/whoami`, and the leading random segment - not the scope -
 is what makes the first 12 characters unique for lookup.
 
-🔴 The key is not reliably splittable, so this is stronger than a style
+Constraint: the key is not reliably splittable, so this is stronger than a style
 preference. The random segments are base64url, and that alphabet contains `_`:
 roughly one key in six has an underscore inside a random segment, and
 `key.split("_")[2]` then returns the wrong field. Treat the whole string as one

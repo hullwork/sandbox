@@ -63,9 +63,9 @@ gVisor Runtime.
 
 **Status: alpha (`0.1.0`).** `main` is the only channel and not a stability
 promise — [Known limitations](#known-limitations) is deliberately specific.
-**One of four.** [`hullwork/platform-composition`](https://github.com/hullwork/platform-composition)
-is where the four repositories are described together; this one is about Sandbox
-Platform alone.
+**Self-contained.** This repository is the whole product: it depends on no other
+repository, and other products integrate with it as an external tenant through the
+API keys and contracts documented here.
 
 ---
 
@@ -250,8 +250,8 @@ there is one, so it joins a trace an upstream gateway already started rather tha
 beginning a parallel one; see the [HTTP and SDK contract](docs/API.md#request-tracing).
 
 Known gap, stated here rather than left to be discovered: object-storage calls go out
-through the `mc` command-line client, which has no header injection point, so that hop
-is untraced. Someone who finds a hole in a trace should be able to confirm it is
+through `boto3`, which does not yet propagate `traceparent`, so that hop is
+not traced yet. Someone who finds a hole in a trace should be able to confirm it is
 expected instead of first suspecting their own query.
 
 ---
@@ -259,8 +259,9 @@ expected instead of first suspecting their own query.
 ## Deployment profiles
 
 Kustomize overlays under [`overlays/`](overlays/) layer on the provider-neutral base in
-[`k8s/`](k8s/). All of them render with `kubectl kustomize <path>`; CI checks that on
-every push.
+[`k8s/`](k8s/). Every overlay renders with `kubectl kustomize <path>` except
+`overlays/local-dev`, which is a Kustomize Component consumed by `overlays/local`
+rather than a deployable overlay; CI checks the others on every push.
 
 | Profile | Intended for | Maturity |
 | --- | --- | --- |

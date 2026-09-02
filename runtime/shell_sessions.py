@@ -32,21 +32,26 @@ SESSION_ACTIONS = {
     "session_kill",
 }
 MAX_INPUT_BYTES = 8_192
-#Keep the same upper limit as non-session paths (runtime_server.MAX_COMMAND_BYTES). missing it
-#The upper limit of the body (64000) is the upper limit of the command, and PTY cannot write such a long line at a time.
+# Same cap as the non-session path (runtime_server.MAX_COMMAND_BYTES). Without it
+# the body cap (64000) becomes the command cap, and a PTY cannot take a line that
+# long in one write.
 MAX_COMMAND_BYTES = 8_192
-#How long it takes to write PTY is considered a failure. If the next line in canonical mode exceeds MAX_CANON, it will no longer be queued.
-#Rather than silently discarding the second half of the command, it is better to report an error.
+# How long a PTY write may take before it counts as failed. In canonical mode a
+# line past MAX_CANON is not queued any further; reporting an error beats
+# silently dropping the second half of the command.
 WRITE_TIMEOUT_SECONDS = 10.0
-#How long does it take to wait after SIGKILL to calculate "the kernel has not been recycled yet". SIGKILL cannot be captured, and the process cannot do anything during this waiting period.
-#For anything, the duration is only determined by scheduling and memory recycling - and Runtime runs in gVisor + 500m CPU,
-#The original 1s is not enough at full load. There is no cost in waiting longer, and if you wait not enough, zombie processes will be left behind.
+# How long to wait after SIGKILL before concluding "the kernel has not reaped it
+# yet". SIGKILL cannot be caught and the process does nothing during this wait;
+# the duration depends only on scheduling and memory reclaim - and the Runtime
+# runs under gVisor with 500m CPU, where the original 1s was not enough at full
+# load. Waiting longer costs nothing; waiting too little leaves zombies behind.
 KILL_REAP_SECONDS = 10.0
-#The upper limit of reader thread closing. After _closed is set, it can complete one round of select at most (0.1s), 5s is
-#margin under full load.
+# Upper bound on joining the reader thread. Once _closed is set it finishes at
+# most one more select round (0.1s); 5s is the margin for full load.
 READER_JOIN_SECONDS = 5.0
-#How long to wait after the child process exits is considered "the kernel has not made it waitable". EOF/EIO on the PTY side becomes
-#For zombies, this wait only covers that window, which is normally microseconds.
+# How long to wait after the child exits before concluding "the kernel has not
+# made it waitable yet". EOF/EIO on the PTY side arrives before the zombie is
+# reapable; this wait covers only that window, normally microseconds.
 EXIT_REAP_SECONDS = 5.0
 
 

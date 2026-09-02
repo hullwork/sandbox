@@ -3,6 +3,19 @@
 Configuration is supplied through Kubernetes ConfigMaps and Secrets. Never put
 credentials in Git, command history, the operator console, or workspace volumes.
 
+## Scope
+
+This document lists every environment variable the shipped code reads, for all
+four process roles: the **Control Plane** (`SANDBOX_CONTROL_PLANE_ROLE=api`),
+the **volume** role of the same image (`SANDBOX_CONTROL_PLANE_ROLE=volume`),
+the **Runtime** server inside each sandbox Pod, and the **file-service** that
+runs beside it (and, as a CronJob, garbage-collects workspaces). Client-side
+variables read by the SDK, `sandboxctl`, the MCP server and the benchmark
+runner are listed at the end. Defaults are the values in the source; a test
+(`tests/test_configuration_reference.py`) fails when the code reads a name that
+appears in neither this document nor [SYSTEM_SPECIFICATIONS.md](SYSTEM_SPECIFICATIONS.md),
+where the capacity limits live.
+
 ## Where a setting belongs
 
 | Class | Examples | Owner | Runtime editable |
@@ -73,7 +86,7 @@ Three rules decide what happens at startup:
 Switching it off removes the credential from the process, so the API refuses it
 too. Hiding the field in the Console is not the control; do not treat it as one.
 
-🔴 **`SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED=false` does not close every non-OIDC way in.**
+Constraint: **`SANDBOX_CONTROL_PLANE_LOCAL_LOGIN_ENABLED=false` does not close every non-OIDC way in.**
 It governs the static `SANDBOX_CONTROL_PLANE_TOKEN` and nothing else. API keys issued by this
 control plane keep authenticating exactly as before, and they are meant to:
 they are how any external service calls this platform, and they are revocable,
@@ -145,12 +158,100 @@ attributed to a person, so:
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_DRAIN_SECONDS` | `5` | After SIGTERM, seconds `/readyz` reports `503` before listening stops, so Endpoints drop the Pod first |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_INFLIGHT_SECONDS` | `120` | Seconds to wait for in-flight requests and background Runtime creation after listening stops |
 | `SANDBOX_CONTROL_PLANE_SHUTDOWN_REAPER_SECONDS` | `60` | Seconds to wait for the reaper to finish its current round; the sum of the three shutdown values must stay below `terminationGracePeriodSeconds` |
+| `SANDBOX_IDLE_EVICT_SECONDS` | `300` | When the Runtime pool is full, a Runtime idle longer than this is released early to make room instead of answering `429`; shorter than the TTL |
+| `SANDBOX_MAX_INFLIGHT_CREATES` | `SANDBOX_MAX_RUNTIMES` | Background Runtime creations allowed at once; each holds a thread, so this bounds memory under a burst |
+| `ACCESS_TOKEN_TTL_SECONDS` | `900` | Lifetime of the scoped Runtime access tokens the Control Plane mints |
+| `OBJECT_TICKET_TTL_SECONDS` | `900` | Upper bound on an object ticket's `expires_in`; every ticket is single-use through a Kubernetes Lease |
+| `MAX_STREAM_OBJECT_BYTES` | `67108864` (64 MiB) | Largest object streamed through the Control Plane |
+| `CHECKPOINT_RETENTION_SECONDS` | `2592000` (30 days) | Age past which the checkpoint GC deletes a checkpoint |
+| `CHECKPOINT_GC_INTERVAL_SECONDS` | `3600` | Seconds between checkpoint GC rounds |
+
+### Listening and topology
+
+The Control Plane needs to know where it runs. These names are set by the
+manifests in `k8s/`; change them together with the resources they name.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANDBOX_CONTROL_PLANE_HOST` | `0.0.0.0` | Listen address |
+| `SANDBOX_CONTROL_PLANE_PORT` | `8080` | Listen port |
+| `SANDBOX_NAMESPACE` | `sandbox-workloads` | Namespace Runtime Pods, Services and workspace PVCs are created in |
+| `SANDBOX_SYSTEM_NAMESPACE` | `sandbox-system` | Namespace the Control Plane itself runs in |
+| `SANDBOX_RUNTIME_IMAGE` | see [SYSTEM_SPECIFICATIONS.md](SYSTEM_SPECIFICATIONS.md) | Image for the built-in default template |
+| `WORKSPACE_PVC` | `sandbox-workspaces` | Name of the shared RWX claim mounted with a per-workspace `subPath` in `shared` storage mode |
+| `SANDBOX_RWX_STORAGE_CLASS` | `sandbox-rwx` | StorageClass for the PVC created per workspace in `per-workspace` storage mode |
+| `SANDBOX_CONTROL_PLANE_WORKSPACE_ROOT` | `/workspaces` | Mount point of the whole workspace volume; only the volume role mounts it |
+| `VOLUME_AGENT_URL` | empty | Service URL of the volume role. Empty means no volume agent: a file read while the Runtime is absent answers `409` instead of pretending the file does not exist |
+| `VOLUME_AGENT_TOKEN` | empty for `api`, required for `volume` | Shared secret between the two roles (Secret `sandbox-volume-auth`). Deliberately not `SIGNING_KEY`, which must never enter `sandbox-workloads` |
+| `SANDBOX_STORE_PATH` | `/tmp/sandbox-control-plane.db` | SQLite file when `SANDBOX_STORE_BACKEND=sqlite`; local development only |
+
+### Kubernetes API access
+
+The `api` role talks to the Kubernetes API with its Pod service account. The
+first name is injected by Kubernetes into every Pod and is required; the rest
+default to the standard projected-token paths.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `KUBERNETES_SERVICE_HOST` | injected by Kubernetes | API server host; startup fails without it |
+| `KUBERNETES_SERVICE_PORT_HTTPS` | `443` | API server port |
+| `KUBERNETES_TOKEN_FILE` | `/var/run/secrets/kubernetes.io/serviceaccount/token` | Service-account token file |
+| `KUBERNETES_CA_FILE` | `/var/run/secrets/kubernetes.io/serviceaccount/ca.crt` | CA bundle used to verify the API server |
+
+### Object store
+
+Any S3-compatible endpoint works. Buckets are not created by the Control
+Plane; the storage side initialises them and only the names are configured
+here. The first three have no default: a Control Plane started without them
+exits after listing every missing name (ConfigMap `object-store-config`,
+Secret `object-store-credentials`).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OBJECT_STORE_ENDPOINT` | **required** | S3 endpoint URL: a Service DNS name, `http://<NodeIP>:<NodePort>`, or a hosted endpoint |
+| `OBJECT_STORE_ACCESS_KEY` | **required** | Access key, from the Secret |
+| `OBJECT_STORE_SECRET_KEY` | **required** | Secret key, from the Secret |
+| `OBJECT_STORE_UPLOAD_BUCKET` | `user-uploads` | Bucket for user uploads |
+| `OBJECT_STORE_AGENT_BUCKET` | `agent-data` | Bucket for agent-produced objects |
+| `OBJECT_STORE_WORKSPACE_BUCKET` | `sandbox-workspaces` | Bucket for workspace checkpoints |
+| `OBJECT_STORE_HEALTH_PATH` | empty | Anonymously reachable health path on the endpoint, probed by `/healthz`. Empty skips the probe: a vendor path such as `/minio/health/ready` is `404` on every other implementation and would fail the probe forever |
 | `OBJECT_STORE_SIGNATURE_VERSION` | `S3v4` | Request signing version, `S3v2` or `S3v4` |
 | `OBJECT_STORE_ADDRESSING_STYLE` | `auto` | Bucket addressing, `auto`, `virtual`, or `path` |
-| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | empty | Optional full OTLP/HTTP JSON `/v1/traces` endpoint; empty disables span export without affecting serving |
+
+### Trace export
+
+Span export follows the OpenTelemetry environment names. Only OTLP/HTTP JSON
+is implemented; naming another protocol while an endpoint is set fails
+startup. The `*_TRACES_*` name wins over the generic one where both exist.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | empty | Full OTLP/HTTP JSON `/v1/traces` endpoint; empty falls back to the generic endpoint, and with both empty span export is disabled without affecting serving |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | empty | Generic OTLP base URL; `/v1/traces` is appended |
+| `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | `OTEL_EXPORTER_OTLP_PROTOCOL` | Must be `http/json` |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/json` | Generic protocol; the only accepted value |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | `OTEL_EXPORTER_OTLP_HEADERS` | Comma-separated `key=value` headers sent with every export, percent-decoded |
+| `OTEL_EXPORTER_OTLP_HEADERS` | empty | Generic form of the same |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10` | Maximum seconds for one background OTLP batch export; never spent on a request thread |
 | `OTEL_BSP_MAX_QUEUE_SIZE` | `2048` | Bounded completed-span queue; overflow drops spans and increments `sandbox_trace_export_drops_total{reason="queue_full"}` |
 | `OTEL_SERVICE_NAME` | `sandbox-control-plane` | Stable service identity attached to exported spans; the volume role should use `sandbox-volume` |
+| `OTEL_SERVICE_VERSION` | `unknown` | `service.version` resource attribute on exported spans |
+
+### Grafana embedding
+
+Optional. The Console embeds one Grafana dashboard through a Control Plane
+proxy; without `SANDBOX_GRAFANA_URL`, a token and a datasource uid the
+integration is off and the Console says so. Details and the required Grafana
+permissions are in [observability/README.md](../observability/README.md).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANDBOX_GRAFANA_URL` | empty | `http(s)://` origin of Grafana; credentials, query or fragment in the value disable it |
+| `SANDBOX_GRAFANA_TOKEN` | empty | Viewer service-account token |
+| `SANDBOX_GRAFANA_TOKEN_FILE` | empty | File to read the token from, used when the direct value is unset; a missing file means "not configured" |
+| `SANDBOX_GRAFANA_DATASOURCE_UID` | empty | Datasource the panels query; required for the embed |
+| `SANDBOX_GRAFANA_DASHBOARD_UID` | `sandbox-control-plane` | Dashboard uid; an invalid value falls back to the default |
+| `SANDBOX_GRAFANA_ORG_ID` | `1` | Grafana organisation id |
 
 ## Control-plane database
 
@@ -172,17 +273,72 @@ The MySQL backend renders the shared schema with `VARCHAR` columns in place of
 `TEXT` and requires MySQL 8.0 or later (`utf8mb4`, `UTC_TIMESTAMP(6)`).
 `overlays/local` is the reference MySQL deployment.
 
-Object-store endpoint, bucket, access key, secret key, and TLS settings are declared
-in `k8s/object-store.yaml` and consumed through the `OBJECT_STORE_*` names. See source and manifests
-for lower-level tuning variables; changing capacity limits must be reviewed together
-with namespace quota, Pod requests, and storage behavior.
+Changing capacity limits must be reviewed together with namespace quota, Pod
+requests, and storage behavior.
 
-## MCP server settings
+## Runtime settings
+
+Read by `runtime/runtime_server.py` inside every sandbox Pod. The Control Plane
+sets the identity and key values on the Pod it creates (`control_plane/manifests.py`);
+an operator changes only the listen and session limits, through the template.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SANDBOX_SESSION_ID` | required | Any stable string; it selects the Workspace the MCP session works in, so the same value always lands in the same Workspace |
+| `SANDBOX_HOST` | `0.0.0.0` | Listen address |
+| `SANDBOX_PORT` | `8080` | Listen port |
+| `SANDBOX_ID` | set by the Control Plane | Runtime id (`sb-...`) |
+| `WORKSPACE_ID` | set by the Control Plane | Workspace id (`ws-...`) the Runtime is attached to |
+| `SANDBOX_CAPABILITY_KEY` | set by the Control Plane | Per-instance verification key derived from `SIGNING_KEY` and the epoch; never a credential a caller sends |
+| `SANDBOX_CAPABILITY_EPOCH` | `1` | Epoch the key was derived under; bumping it invalidates keys read out of older containers |
+| `SANDBOX_WORKSPACE` | `/workspace` | Mount point of the Workspace inside the Pod |
+| `SANDBOX_MAX_SHELL_SESSIONS` | `16` | Persistent shell sessions per Runtime; must be greater than zero |
+| `SANDBOX_SHELL_SESSION_IDLE_TTL_SECONDS` | `1800` | A shell session idle longer than this is closed |
+| `SANDBOX_SHELL_SESSION_MAX_WALL_SECONDS` | `3600` | Absolute lifetime of a shell session |
+
+## file-service settings
+
+Read by `file-service/file_service.py`, which serves workspace file operations
+beside the Runtime. The Runtime process fills in the `WORKSPACE_*` and
+`FILE_SERVICE_*` identity values from its own `SANDBOX_*` ones when they are
+unset, so a Pod configures them once.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FILE_SERVICE_HOST` | `0.0.0.0` | Listen address |
+| `FILE_SERVICE_PORT` | `8081` | Listen port |
+| `WORKSPACE_CAPABILITY_KEY` | `SANDBOX_CAPABILITY_KEY` | Verification key for workspace-scoped tickets |
+| `FILE_SERVICE_CAPABILITY_KEY` | `WORKSPACE_CAPABILITY_KEY` | Older name of the same key, still honoured when the newer one is unset |
+| `WORKSPACE_CAPABILITY_EPOCH` | `1` | Epoch of that key |
+| `WORKSPACE_ID` | set by the Control Plane | Workspace id served |
+| `FILE_SERVICE_WORKSPACE` | `/workspace` | Workspace mount point |
+| `MAX_CHECKPOINT_BYTES` | `67108864` (64 MiB) | Largest checkpoint archive written |
+| `MAX_CHECKPOINT_SOURCE_BYTES` | `268435456` (256 MiB) | Largest workspace a checkpoint may be taken from |
+| `MAX_CHECKPOINT_ENTRIES` | `20000` | Entry cap of a checkpoint archive |
+| `MAX_BUNDLE_ENTRIES` | `5000` | Entry cap of a delivery bundle, deliberately tighter than a checkpoint |
+
+### Workspace garbage collection
+
+`k8s/workspace-gc.yaml` runs `file-service/gc_workspaces.py` as a CronJob on
+the shared volume.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `WORKSPACE_GC_ROOT` | `/workspaces` | Volume root the job scans |
+| `WORKSPACE_DATA_TTL_SECONDS` | `2592000` (30 days) | Workspace directories untouched for longer are deleted |
+| `WORKSPACE_GC_DRY_RUN` | `false` | `1`, `true` or `yes` reports candidates without deleting |
+
+## Client-side settings
+
+Read by the SDK (`sandbox_platform`), `sandboxctl`, the MCP server and the
+benchmark runner, on the caller's machine rather than in the cluster.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SANDBOX_CONTROL_PLANE_URL` | `http://127.0.0.1:18080` (no default in `bench/runner.py`) | Control Plane base URL |
+| `SANDBOX_TOKEN` | required | API key or break-glass token presented to the Control Plane |
+| `SANDBOX_SESSION_ID` | required for the MCP server | Any stable string; it selects the Workspace the MCP session works in, so the same value always lands in the same Workspace |
 | `SANDBOX_LIFECYCLE_REFRESH_SECONDS` | `60` | Interval at which the client refreshes the Runtime lifecycle; values below `5` are raised to `5` |
+| `SANDBOX_KUBE_CONTEXT` | empty | `bench/runner.py` only: kubeconfig context for the cluster-side measurements |
 
 ## Startup behavior
 

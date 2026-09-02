@@ -285,20 +285,21 @@ def jsonrpc_error(request_id: Any, code: int, message: str) -> dict:
 
 
 def tool_failure(request_id: Any, exc: BaseException) -> dict:
-    """Core function: Convert **any** exceptions during tool execution into a recoverable JSON-RPC error.
+    """Turn **any** exception raised while a tool runs into a recoverable JSON-RPC error.
 
-    Responsibilities: Only mapping exceptions to error codes; not responsible for HTTP status codes or cleaning up sessions.
+    Responsibility: mapping exceptions to error codes, nothing else - not HTTP status codes, not session cleanup.
 
-    🔴 Constraints: This must be exhaustive (the last one is a bottom-up branch, not a specific type). It turns out
-        The handler only catches ValueError, so there are three places in SessionCapacityError and _write
-        RuntimeError escapes directly from the handler, and the client gets RemoteDisconnected;
-        Control Plane's proxy_runtime_mcp is then folded into a universal one
-        502 "internal service unavailable" —— "all 16 shell sessions are busy"
-        This sentence has never been sent to the caller, and it is the only information that can guide the caller's behavior.
-        (Change the session_id / try again later, instead of treating the sandbox as dead and rebuilding it).
+    🔴 Constraint: this must be exhaustive (the last branch is a catch-all, not a specific type). History:
+        the handler used to catch only ValueError, so SessionCapacityError and the three RuntimeErrors
+        raised in _write escaped straight out of the handler and the client saw RemoteDisconnected;
+        Control Plane's proxy_runtime_mcp then folded that into a generic
+        502 "internal service unavailable" - and "all 16 shell sessions are busy",
+        the one sentence that tells the caller what to do (change the session_id or retry later,
+        instead of declaring the sandbox dead and rebuilding it), never reached them.
 
-    Boundary: message uses str(exc) directly. This is the internal state of the tenant's own sandbox and does not span tenants.
-        What was leaked was troubleshooting information such as "write PTY timeout and N bytes left", which is worth keeping."""
+    Boundary: the message is str(exc) as is. It is the internal state of the tenant's own sandbox and
+        crosses no tenant boundary; what it exposes is troubleshooting detail such as "PTY write timed
+        out with N bytes left", which is worth keeping."""
     if isinstance(exc, ValueError):
         return jsonrpc_error(request_id, -32602, str(exc))
     if isinstance(exc, SessionCapacityError):

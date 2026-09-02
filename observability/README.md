@@ -20,7 +20,7 @@ Counters are pre-registered at zero for every known label combination
 rather than an absent series - otherwise it would be indistinguishable from
 "this build does not emit that metric".
 
-🔴 **No series carries a tenant, workspace or sandbox identifier.** That is what
+Constraint: **no series carries a tenant, workspace or sandbox identifier.** That is what
 makes an unauthenticated `/metrics` acceptable, and it is enforced by
 `tests/test_observability_artifacts.py` for the alert rules. Per-tenant numbers
 come from the authenticated `/v1/admin` routes. Adding a tenant label means
@@ -68,8 +68,9 @@ trace-id log correlation remains available.
 
 ## Known gaps
 
-- The native `mc` subprocess has no trace-header injection point. Its local
-  operation is a span, but the S3/RGW server side is not its child.
+- Object-storage calls go out through `boto3`, which does not yet propagate
+  `traceparent`, so that hop is not traced yet. The local operation is a span,
+  but the S3/RGW server side is not its child.
 - Worker node provisioning is outside the Sandbox product boundary. infra's
   node-pool provider must emit the autoscaler decision/VM bootstrap/CNI/CSI-ready
   spans; `sandbox_runtime_create_phase_seconds{phase="pod_ready"}` begins only
@@ -105,13 +106,13 @@ allowlist** of the paths a solo panel needs - the panel document, Grafana's own
 bundle, its frontend settings, the dashboard model, plugin settings, and
 `POST /api/ds/query`. Everything else is 403.
 
-🔴 The allowlist is a code constant on purpose. Proxying `/grafana/*` wholesale
+Constraint: the allowlist is a code constant on purpose. Proxying `/grafana/*` wholesale
 while attaching the service-account token would republish the entire Grafana API
 - including `/api/datasources/proxy/...`, which is "run any query against any
 datasource" - to every administrator of this console. A configurable allowlist is
 the same hole with a delay on it.
 
-🔴 `POST /api/ds/query` is checked in the **body**, not just by URL. It is
+Constraint: `POST /api/ds/query` is checked in the **body**, not just by URL. It is
 Grafana's generic query endpoint and dispatches on a datasource uid inside the
 request, so it is only read-only for the datasource it names: a Grafana with a
 SQL datasource attached would otherwise turn that one endpoint into arbitrary
