@@ -33,7 +33,7 @@
 #     pull_request. When it is off, the gate says so out loud -- a disabled
 #     check that announces itself is recoverable; a silent one is not.
 #
-# Two more habits, learned from a sibling repository whose identical gate
+# Two more habits, learned from another repository whose identical gate
 # stayed green for months without evaluating a single finding:
 #   - no pipe carries the exit status. `jq ... | tee` reports tee's 0, so a jq
 #     program that does not even compile still passes.
