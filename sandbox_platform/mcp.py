@@ -441,7 +441,15 @@ def main(argv: list[str] | None = None) -> int:
             "(stdin is a terminal; see --help)\n"
         )
         return 2
-    serve(sys.stdin, sys.stdout)
+    # The protocol owns fd 1 through a handle of its own. Anything else that
+    # writes to "stdout" while a tool runs - a stray print in the SDK, a
+    # library's debug output - lands on stderr instead: one such line in the
+    # middle of the JSON stream and the host drops the connection. (Python's
+    # logging already falls back to stderr when nothing is configured.)
+    sys.stdout.flush()
+    protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", encoding="utf-8")
+    sys.stdout = sys.stderr
+    serve(sys.stdin, protocol)
     return 0
 
 

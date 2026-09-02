@@ -110,6 +110,50 @@ class BridgeSurvivesBadInputTests(unittest.TestCase):
         self.assertEqual(responses[0]["error"]["code"], -32700)
 
 
+class ProtocolStreamIsolationTests(unittest.TestCase):
+    def test_stdout_carries_only_the_protocol_when_a_tool_prints(self) -> None:
+        """A print() during a tool call must not reach the host's stdin.
+
+        The SDK does not print today, so the stray line is injected here by
+        wrapping the status tool. The bridge is expected to have moved
+        sys.stdout aside before serving; the protocol answer alone may appear
+        on fd 1 and the noise has to surface on stderr.
+        """
+        script = (
+            "import sys\n"
+            "from sandbox_platform import mcp\n"
+            "real = mcp.manager.status\n"
+            "def noisy(*args, **kwargs):\n"
+            "    print('debug noise from a tool')\n"
+            "    return real(*args, **kwargs)\n"
+            "mcp.manager.status = noisy\n"
+            "raise SystemExit(mcp.main([]))\n"
+        )
+        env = {
+            **os.environ,
+            "SANDBOX_CONTROL_PLANE_URL": "http://127.0.0.1:1",
+            "SANDBOX_TOKEN": "x",
+            "SANDBOX_SESSION_ID": "isolation",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": str(ROOT),
+        }
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            input=call("sandbox_status", {}) + "\n",
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=ROOT,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        lines = completed.stdout.splitlines()
+        self.assertEqual(len(lines), 1, completed.stdout)
+        self.assertEqual(json.loads(lines[0])["id"], 1)
+        self.assertIn("debug noise from a tool", completed.stderr)
+
+
 class HandleNeverRaisesTests(unittest.TestCase):
     def test_an_unexpected_exception_becomes_an_internal_error_response(self) -> None:
         # KeyError is not in the tool-error tuple on purpose: the case here is
