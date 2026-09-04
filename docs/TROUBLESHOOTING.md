@@ -9,6 +9,21 @@ other clusters. The local kubeconfig is `.sandbox/kubeconfig` with context
 export KUBECONFIG="$PWD/.sandbox/kubeconfig"
 ```
 
+## `make doctor` cannot reach Docker or reports insufficient capacity
+
+**Symptom.** The first quickstart phase stops before creating a VM because the
+Docker daemon is unreachable, available memory is below 8 GiB, or free space under
+`$LIMA_HOME` is below 35 GiB for a new profile. Reusing an existing `sandbox-local`
+profile lowers the capacity gate to 2 GiB memory and 5 GiB disk.
+
+**Fix.** On macOS, start Docker Desktop (`open -a Docker`) and wait until it is
+ready. On Linux, start the Docker service and verify `docker context show`. Free
+unused Docker build cache or move `LIMA_HOME` to a larger volume before retrying.
+`SANDBOX_DOCTOR_SKIP_RESOURCES=1` bypasses only the capacity gate and should be used
+only after checking the host yourself. `make quickstart` is resumable: it reuses the
+partially created Lima VM and writes the failed phase to
+`.sandbox/quickstart-summary.json`.
+
 ## `context "sandbox-local" does not exist`
 
 **Symptom.** `make dev-token`, `make control-plane-forward`, or a manual `kubectl --context sandbox-local` fails with this message.

@@ -109,11 +109,12 @@ RUN_ID="run-${OBJECT_SUFFIX}"
 STAGE="health"
 curl --silent --show-error --fail \
   "${API_URL}/healthz" >"${TEMP_DIR}/health.json"
-#Assert "ok" instead of relaxing to "ok"/"unchecked": Control Plane reports truthfully when the probe path is empty
-#unchecked, and the object-store-config deployed locally has health-path ——
-#If you really receive unchecked, it means that the configuration is drifting. You should fail here instead of letting it go.
+# Some S3 providers expose an anonymous health URL and report "ok" here. Rook
+# RGW deliberately has no such URL, so its truthful value is "unchecked". The
+# authenticated put/get/versioning checks below are the actual provider health
+# proof and fail immediately if the endpoint or credentials have drifted.
 assert_json \
-  'data["status"] == "ok" and data["object_storage"] == "ok"' \
+  'data["status"] == "ok" and data["object_storage"] in ("ok", "unchecked")' \
   "${TEMP_DIR}/health.json"
 
 STAGE="upload-put"
@@ -432,11 +433,11 @@ for BAD_OWNER in "../.." "a/b/c" "" "local"; do
   [[ "${OWNER_STATUS}" == "400" ]]
 done
 
-#It turns out that this paragraph also asserts that the Service type of sandbox-minio is ClusterIP and the PVC is Bound.
-#Those two tests are about the storage implementation itself. The object is no longer in the cluster and has gone with the storage unit.
-#The remaining difference is that it tests the permission boundaries of the credentials in Control Plane's hand - take Control Plane's own
-#Credentials to do admin operations must fail. This is an assertion on the Control Plane side, and it holds true regardless of the storage.
-STAGE="credential-scope"
+# The local RGW identity is intentionally capped at the three managed buckets.
+# Bucket-policy changes are normal S3 bucket-owner operations, not Ceph admin
+# operations, so they cannot prove that this identity is constrained. Attempting
+# to provision a fourth bucket exercises the quota boundary Rook actually sets.
+STAGE="credential-quota"
 SANDBOX_CONTROL_PLANE_POD="$(
   kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
     --namespace sandbox-system \
@@ -449,9 +450,9 @@ SANDBOX_CONTROL_PLANE_POD="$(
 kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
   --namespace sandbox-system \
   exec "${SANDBOX_CONTROL_PLANE_POD}" -- python3 -c '
-import json
 import os
 import sys
+import uuid
 
 import boto3
 from botocore.config import Config
@@ -470,18 +471,18 @@ store = boto3.client(
     config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
 )
 
-bucket = os.environ["OBJECT_STORE_WORKSPACE_BUCKET"]
+bucket = "sandbox-forbidden-" + uuid.uuid4().hex[:12]
 try:
-    policy = json.dumps({"Version": "2012-10-17", "Statement": []})
-    store.put_bucket_policy(Bucket=bucket, Policy=policy)
+    store.create_bucket(Bucket=bucket)
 except ClientError as error:
     code = error.response.get("Error", {}).get("Code", "")
     status = error.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-    if code in ("AccessDenied", "MethodNotAllowed") or status in (403, 405):
+    if code in ("AccessDenied", "QuotaExceeded", "TooManyBuckets") or status == 403:
         sys.exit(0)
     print(f"refused, but not for the expected reason: {status} {code}", file=sys.stderr)
     sys.exit(1)
-print("the Control Plane credential could rewrite a bucket policy", file=sys.stderr)
+store.delete_bucket(Bucket=bucket)
+print("the Control Plane credential could create a fourth bucket", file=sys.stderr)
 sys.exit(1)
   '
 

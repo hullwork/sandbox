@@ -47,17 +47,18 @@ operation fails; it never falls back to running on the host.
 ## Try it
 
 ```bash
-python3 -m venv .venv                  # a system-wide install is an error on Debian,
-.venv/bin/pip install -e '.[test]'     # Ubuntu and Fedora (PEP 668)
-make test                      # 831 unit and contract tests, no network, no cluster
+make bootstrap                 # create .venv and install SDK + test dependencies
+make test                      # 833 unit and contract tests, no network, no cluster
+make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```
 
 That is the contract suite: no cluster, no credentials, nothing to clean up.
 The virtual environment is not optional on Debian, Ubuntu or Fedora — a
 system-wide `pip install` is refused there (PEP 668). `make test` uses
-`.venv/bin/python` when it exists and `python3` otherwise, so there is no
-activation step.
+`.venv/bin/python` when it exists and `python3` otherwise, so `make bootstrap`
+and `make test` need no activation step. CLI examples below use the explicit
+`.venv/bin/` path for the same reason.
 [Run the full local cluster](#run-the-full-local-cluster) when you want a real
 gVisor Runtime.
 
@@ -122,11 +123,46 @@ Full method, raw evidence layout, and the explicit statement of what this number
 No Control Plane needed — each of these prints what it accepts:
 
 ```bash
-sandbox --help          # create / run / exec / stop / list
-sandboxctl --help       # operator surface: workspaces, templates, admin keys, audit
-sandbox-mcp --help      # the nine agent-scoped MCP tools and their required env vars
+.venv/bin/sandbox --help      # create / run / exec / stop / list
+.venv/bin/sandboxctl --help   # workspaces, templates, admin keys, audit
+.venv/bin/sandbox-mcp --help  # nine agent-scoped MCP tools and required env vars
 make help               # every Make target with its one-line description
 ```
+
+## One command to see the point
+
+From a fresh clone, this is the shortest path from prerequisites to a real
+gVisor command and durable Workspace proof:
+
+```bash
+make quickstart
+```
+
+It checks the host, creates `.venv`, creates or reuses the repository's isolated
+Lima cluster, and proves all of the following against the live deployment:
+
+- the command reports a gVisor kernel and runs non-root on a read-only root;
+- the Runtime has no Kubernetes service-account token;
+- a Workspace file survives stopping and replacing its Runtime;
+- an unavailable Control Plane fails closed without executing on the host;
+- `/healthz`, `X-Request-Id`, and Prometheus metrics are visible.
+
+The command ends with the first Runtime-call latency and total elapsed time. It
+also writes `.sandbox/quickstart-summary.json` and
+`.sandbox/showcase-result.json`, so install success, phase duration, manual
+interventions, and value-proof results can be compared between machines or CI
+runs. `make smoke-local` reruns only the live proof against an existing cluster.
+The local profile exposes raw Prometheus metrics but intentionally does not install
+Prometheus or Grafana; the Console's Grafana-backed Observability tab appears only
+when an operator configures that external dependency.
+
+For contributors, `make verify` is the one-command pre-PR gate corresponding to
+the executable parts of CI. It keeps successful output compact, stores one log per
+phase under `.sandbox/logs/verify/`, and writes durations and outcome to
+`.sandbox/verify-summary.json`; a failing phase prints its last 100 log lines.
+`make e2e-local` runs all five live cluster scenarios. Release candidates can run
+`make acceptance` to execute quickstart, the source gate, and the full live E2E in
+that order with one command.
 
 ## Run the full local cluster
 
@@ -145,20 +181,23 @@ it first rather than discovering a gap halfway through the VM build.
 | Python | 3.11 or newer |
 | Host OS | macOS or Linux |
 | Host architecture | amd64 or arm64 (`scripts/local-cluster.yaml` pins Ubuntu images for both; gVisor is installed for `x86_64` and `aarch64`) |
-| **Available memory** | **8 GiB free** — a hard check, not a warning |
-| **Free disk** | **40 GiB free** under `$LIMA_HOME` (default `~/.lima`) — also a hard check |
+| **Available memory** | **8 GiB free** for a new profile — a hard check, not a warning |
+| **Free disk** | **35 GiB free** under `$LIMA_HOME` (default `~/.lima`) for a new profile — also a hard check |
 | Virtualization | On Linux, a readable and writable `/dev/kvm`. Without it Lima falls back to QEMU TCG software emulation, which boots kubeadm many times slower and is not usable in practice. `make doctor` warns rather than fails on this one. |
 | Network | Egress to pull the Ubuntu cloud image, Kubernetes apt packages, Cilium, gVisor, Metrics Server, and Rook/Ceph images |
 
 Set `SANDBOX_DOCTOR_SKIP_RESOURCES=1` to bypass only the memory and disk checks. The
 VM itself uses 4 CPUs, 6 GiB memory, and a 60 GiB disk by default, adjustable through
 `SANDBOX_LOCAL_CPUS`, `SANDBOX_LOCAL_MEMORY_GIB`, and `SANDBOX_LOCAL_DISK_GIB`.
+When `sandbox-local` already exists, doctor switches to a 2 GiB memory / 5 GiB disk
+reuse gate because it is not allocating a second VM; explicit
+`SANDBOX_DOCTOR_MIN_*` overrides still win.
 
 ### Bring it up
 
 ```bash
 make doctor
-python3 -m venv .venv && .venv/bin/pip install -e '.[test]'
+make bootstrap
 make up-local
 ```
 
@@ -181,7 +220,7 @@ The Makefile exports `KUBECONFIG` for its own targets, so `make dev-token`,
 ```bash
 export SANDBOX_CONTROL_PLANE_URL=http://127.0.0.1:18080
 export SANDBOX_TOKEN="$(make --no-print-directory dev-token)"
-sandbox run --name demo --stop -- python -c 'print("sandbox-ready")'
+.venv/bin/sandbox run --name demo --stop -- python -c 'print("sandbox-ready")'
 ```
 
 ```text
@@ -202,8 +241,8 @@ make destroy-local  # delete the VM with its disk and the generated .sandbox/ st
 
 `down-local` is the right choice between sessions — `up-local` reuses the stopped VM.
 `destroy-local` is irreversible: Workspace files, checkpoints, and the SQLite state
-inside the VM are gone. Images that `make images` built on the host stay in the local
-Docker daemon until removed with `docker rmi`.
+inside the VM are gone. It also removes the four fixed-tag project images from the
+local Docker daemon; shared base layers remain available to Docker's cache.
 
 ---
 

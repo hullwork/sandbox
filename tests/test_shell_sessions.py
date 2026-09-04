@@ -520,6 +520,10 @@ class ShellSessionTests(unittest.TestCase):
             )
         self.assertIsNotNone(process.returncode)
 
+    @unittest.skipUnless(
+        os.path.isdir("/proc"),
+        "background-session cleanup is a Linux Runtime contract",
+    )
     def test_close_kills_a_background_job_the_shell_left_behind(self) -> None:
         """``cmd &`` survives both killpg calls: interactive bash gives it a
         process group of its own, and it is not the foreground group either.

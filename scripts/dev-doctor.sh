@@ -35,6 +35,11 @@ PY
 
 if ! docker info >/dev/null 2>&1; then
   printf 'Docker is installed but its daemon is not reachable.\n' >&2
+  if [ "$(uname -s)" = Darwin; then
+    printf 'Start Docker Desktop (for example: open -a Docker), wait for it to report Ready, then rerun make doctor.\n' >&2
+  else
+    printf 'Start the Docker service and verify `docker context show` points at the intended daemon, then rerun make doctor.\n' >&2
+  fi
   exit 1
 fi
 
@@ -51,21 +56,48 @@ if [ "$(uname -s)" = Linux ]; then
   fi
 fi
 
-# The default VM reserves 6 GiB of memory and a 60 GiB disk (scripts/local-cluster.sh);
-# the host needs headroom beyond that. Set SANDBOX_DOCTOR_SKIP_RESOURCES=1 to bypass.
+# A new default VM reserves 6 GiB of memory and a 60 GiB disk (sparse)
+# (scripts/local-cluster.sh), so a clean install needs substantial headroom.
+# Reusing an existing VM only needs enough headroom to build images and roll
+# Pods; applying the new-VM threshold after a successful install made retries
+# fail precisely because the VM was already consuming those resources.
+# Set SANDBOX_DOCTOR_SKIP_RESOURCES=1 to bypass either mode.
 if [ "${SANDBOX_DOCTOR_SKIP_RESOURCES:-0}" = 1 ]; then
   printf 'resources  check skipped (SANDBOX_DOCTOR_SKIP_RESOURCES=1)\n'
 else
   LIMA_DISK_DIR="${LIMA_HOME:-$HOME/.lima}"
   [ -d "$LIMA_DISK_DIR" ] || LIMA_DISK_DIR="$HOME"
-  python3 - "$LIMA_DISK_DIR" <<'PY'
+  DEFAULT_MIN_MEMORY_GIB=8
+  DEFAULT_MIN_DISK_GIB=35
+  RESOURCE_MODE=new-profile
+  if limactl list --format '{{.Name}}' 2>/dev/null \
+    | grep -Fx "${SANDBOX_LOCAL_VM:-sandbox-local}" >/dev/null; then
+    DEFAULT_MIN_MEMORY_GIB=2
+    DEFAULT_MIN_DISK_GIB=5
+    RESOURCE_MODE=reuse-profile
+  fi
+  SANDBOX_DOCTOR_DEFAULT_MIN_MEMORY_GIB="$DEFAULT_MIN_MEMORY_GIB" \
+  SANDBOX_DOCTOR_DEFAULT_MIN_DISK_GIB="$DEFAULT_MIN_DISK_GIB" \
+  SANDBOX_DOCTOR_RESOURCE_MODE="$RESOURCE_MODE" \
+    python3 - "$LIMA_DISK_DIR" <<'PY'
 import os
 import shutil
+import subprocess
 import sys
 
 GIB = 1024 ** 3
-MIN_MEMORY_GIB = float(os.environ.get("SANDBOX_DOCTOR_MIN_MEMORY_GIB", "8"))
-MIN_DISK_GIB = float(os.environ.get("SANDBOX_DOCTOR_MIN_DISK_GIB", "40"))
+MIN_MEMORY_GIB = float(
+    os.environ.get(
+        "SANDBOX_DOCTOR_MIN_MEMORY_GIB",
+        os.environ["SANDBOX_DOCTOR_DEFAULT_MIN_MEMORY_GIB"],
+    )
+)
+MIN_DISK_GIB = float(
+    os.environ.get(
+        "SANDBOX_DOCTOR_MIN_DISK_GIB",
+        os.environ["SANDBOX_DOCTOR_DEFAULT_MIN_DISK_GIB"],
+    )
+)
 
 
 def available_memory_bytes() -> int:
@@ -76,6 +108,37 @@ def available_memory_bytes() -> int:
                     return int(line.split()[1]) * 1024
     except OSError:
         pass
+    if sys.platform == "darwin":
+        try:
+            output = subprocess.check_output(
+                ["/usr/bin/vm_stat"], text=True, stderr=subprocess.DEVNULL
+            )
+            page_size = 4096
+            first_line = output.splitlines()[0]
+            if "page size of" in first_line:
+                page_size = int(first_line.split("page size of", 1)[1].split()[0])
+            pages = {}
+            for line in output.splitlines()[1:]:
+                if ":" not in line:
+                    continue
+                name, value = line.split(":", 1)
+                pages[name] = int(value.strip().rstrip("."))
+            # Inactive, speculative and purgeable pages are reclaimable under
+            # pressure. Counting total physical pages here used to print 32 GiB
+            # "available" even when the host had almost no headroom.
+            reclaimable = sum(
+                pages.get(name, 0)
+                for name in (
+                    "Pages free",
+                    "Pages inactive",
+                    "Pages speculative",
+                    "Pages purgeable",
+                )
+            )
+            if reclaimable:
+                return reclaimable * page_size
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            pass
     return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
 
 
@@ -83,6 +146,7 @@ disk_dir = sys.argv[1]
 memory_gib = available_memory_bytes() / GIB
 disk_gib = shutil.disk_usage(disk_dir).free / GIB
 failures = []
+print(f"mode       {os.environ['SANDBOX_DOCTOR_RESOURCE_MODE']}")
 if memory_gib < MIN_MEMORY_GIB:
     failures.append(f"available memory {memory_gib:.1f} GiB is below the {MIN_MEMORY_GIB:g} GiB minimum")
 if disk_gib < MIN_DISK_GIB:
@@ -90,7 +154,11 @@ if disk_gib < MIN_DISK_GIB:
 print(f"memory     {memory_gib:.1f} GiB available")
 print(f"disk       {disk_gib:.1f} GiB free at {disk_dir}")
 if failures:
-    raise SystemExit("; ".join(failures) + " (set SANDBOX_DOCTOR_SKIP_RESOURCES=1 to override)")
+    raise SystemExit(
+        "; ".join(failures)
+        + ". Free Docker/Lima cache or choose a larger LIMA_HOME volume; "
+        + "set SANDBOX_DOCTOR_SKIP_RESOURCES=1 only when you have verified the capacity yourself"
+    )
 PY
 fi
 

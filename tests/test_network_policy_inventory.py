@@ -96,6 +96,15 @@ class NetworkPolicyInventoryTests(unittest.TestCase):
         # including one with no policies at all.
         self.assertTrue(declared())
 
+    def test_live_inventory_omits_postgres_only_for_the_sqlite_profile(self) -> None:
+        text = SCRIPT.read_text(encoding="utf-8")
+        self.assertIn("expected_policies_for_cluster", text)
+        self.assertIn("get service sandbox-postgres", text)
+        self.assertIn(
+            "grep -v '^sandbox-system/sandbox-postgres-ingress$'",
+            text,
+        )
+
 
 class PublicEgressPolicyTests(unittest.TestCase):
     """The egress allow-list, read back from both render paths.

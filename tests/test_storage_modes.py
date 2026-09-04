@@ -76,19 +76,22 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
         self.assertIn('"--for=jsonpath={.status.phase}=Ready" cephobjectstore/object-store', text)
         self.assertNotIn("--for=condition=Ready cephobjectstore", text)
 
-    def test_lima_restarts_fixed_tag_project_deployments_after_apply(self) -> None:
+    def test_lima_restarts_fixed_tag_project_deployments_only_on_update(self) -> None:
         text = (REPO_ROOT / "scripts/local-cluster.sh").read_text()
-        apply_at = text.index('apply -k "$REPO_ROOT/overlays/local"')
-        system_restart_at = text.index(
-            "rollout restart deployment/sandbox-control-plane deployment/sandbox-console"
-        )
+        detection_at = text.index("system_deployments_to_restart=()")
+        apply_at = text.index("apply_local_overlay", detection_at)
+        system_restart_at = text.index('rollout restart "${system_deployments_to_restart[@]}"')
         volume_restart_at = text.index(
             "rollout restart deployment/sandbox-volume"
         )
         status_at = text.index("deployment/sandbox-control-plane --timeout=3m")
+        self.assertLess(detection_at, apply_at)
         self.assertLess(apply_at, system_restart_at)
         self.assertLess(system_restart_at, status_at)
         self.assertLess(volume_restart_at, status_at)
+        self.assertIn("deployment_runs_host_image", text)
+        self.assertIn('if ((${#system_deployments_to_restart[@]}))', text)
+        self.assertIn("if ((restart_volume_deployment))", text)
 
     def test_lima_waits_only_for_objects_the_local_overlay_renders(self) -> None:
         if shutil.which("kubectl") is None:
@@ -159,6 +162,7 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
         self.assertNotIn("put_bucket_policy", text)
         self.assertIn("kind: CephObjectStoreUser", rook)
         self.assertIn("name: sandbox-runtime", rook)
+        self.assertIn("maxBuckets: 3", rook)
         # Versioning on every bucket the Job creates. This counted
         # `mc version enable` until the MinIO Client was removed; counting the
         # command was always a proxy for "all three, none forgotten", so the
@@ -167,6 +171,8 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
         self.assertEqual(text.count("OBJECT_STORE_AGENT_BUCKET"), 2)
         self.assertEqual(text.count("OBJECT_STORE_WORKSPACE_BUCKET"), 2)
         self.assertIn("VersioningConfiguration", text)
+        self.assertIn("existing_buckets", text)
+        self.assertIn("if bucket not in existing_buckets", text)
 
 if __name__ == "__main__":
     unittest.main()
