@@ -40,14 +40,21 @@ images plus the pinned Metrics Server image into containerd, and applies a
 self-contained development profile:
 
 ```bash
-make doctor
-make up-local
+make quickstart
 make status-local
 make dev-token
 make down-local
 ```
 
-`make doctor` fails when less than 8 GiB of memory or 40 GiB of disk is free and
+`make quickstart` runs `make doctor`, creates the repository-local `.venv`,
+deploys this kubeadm profile, and executes a live gVisor/persistence/fail-closed
+proof. It records phase timing and outcome in
+`.sandbox/quickstart-summary.json`. Use `make up-local` directly when the Python
+environment is already prepared and only the deployment needs updating.
+
+For a new profile, `make doctor` fails when less than 8 GiB of memory or 35 GiB
+of disk is free. When the dedicated `sandbox-local` VM already exists, it uses a
+2 GiB memory / 5 GiB disk reuse gate instead. It
 warns when `/dev/kvm` is absent on Linux (Lima then falls back to QEMU software
 emulation, which is far slower). Set `SANDBOX_DOCTOR_SKIP_RESOURCES=1` to skip the
 resource gate.
@@ -216,7 +223,7 @@ current context by accident:
 KUBECONFIG=/path/to/sandbox.kubeconfig \
 SANDBOX_KUBE_CONTEXT=sandbox-local \
 SANDBOX_CONTROL_PLANE_URL=http://127.0.0.1:18080 \
-bash scripts/run-all-e2e.sh
+make e2e-local
 ```
 
 The runner verifies network policy, core behavior, object storage, restart recovery, and adversarial paths. It requires both documented namespaces and a reachable Control Plane health endpoint.

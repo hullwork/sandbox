@@ -303,7 +303,10 @@ def main() -> None:
     try:
         status, health = api("GET", "/healthz")
         expect(status, 200, health)
-        assert health.get("object_storage") == "ok", health
+        # Rook RGW has no anonymous health endpoint, so Control Plane reports
+        # "unchecked" truthfully. The authenticated object-store operations in
+        # this scenario are the effective readiness proof.
+        assert health.get("object_storage") in {"ok", "unchecked"}, health
 
         status, workspace = api(
             "POST",

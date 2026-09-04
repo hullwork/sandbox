@@ -62,7 +62,9 @@ def file_service_build_commands() -> dict[str, list[str]]:
     for name in tracked_files("*.sh", "*.yml", "*.yaml", "Makefile"):
         text = (REPO_ROOT / name).read_text(encoding="utf-8")
         for line in join_continuations(text):
-            if line.lstrip().startswith("#") or "docker build" not in line:
+            if line.lstrip().startswith("#") or not (
+                "docker build" in line or "scripts/build-image.sh" in line
+            ):
                 continue
             if "file-service/Dockerfile" in line or "file_service_image" in line:
                 hits.setdefault(name, []).append(line)

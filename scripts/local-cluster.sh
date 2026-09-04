@@ -13,6 +13,7 @@ SANDBOX_CONTROL_PLANE_PORT="${SANDBOX_LOCAL_CONTROL_PLANE_PORT:-18080}"
 VM_CPUS="${SANDBOX_LOCAL_CPUS:-4}"
 VM_MEMORY_GIB="${SANDBOX_LOCAL_MEMORY_GIB:-6}"
 VM_DISK_GIB="${SANDBOX_LOCAL_DISK_GIB:-60}"
+IMAGE_BUILD_JOBS="${SANDBOX_IMAGE_BUILD_JOBS:-4}"
 # Fixed local tags: imagePullPolicy Never in the manifests matches these names.
 PROJECT_IMAGES=(
   sandbox-runtime:0.5.0
@@ -143,12 +144,21 @@ ensure_cluster() {
     --for=condition=Ready --timeout=5m
 }
 
-build_and_load_images() {
-  make -C "$REPO_ROOT" images
+build_images() {
+  [[ "$IMAGE_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'SANDBOX_IMAGE_BUILD_JOBS must be a positive integer, got %s\n' \
+      "$IMAGE_BUILD_JOBS" >&2
+    return 1
+  }
+  make -C "$REPO_ROOT" --no-print-directory -j "$IMAGE_BUILD_JOBS" images
+}
+
+load_images() {
   local image
   for image in \
     "${PROJECT_IMAGES[@]}" \
     registry.k8s.io/metrics-server/metrics-server@sha256:d9862115e7c7881280d3d75ca26bda8ffc0fc213315979575bf23ce9826205c0; do
+    printf '  loading %s into %s\n' "$image" "$VM_NAME"
     docker image inspect "$image" >/dev/null 2>&1 || docker pull "$image"
     docker save "$image" | limactl shell "$VM_NAME" -- sudo ctr \
       --namespace k8s.io images import - >/dev/null
@@ -218,8 +228,82 @@ deploy_ceph_rgw() {
     | kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -f -
 }
 
+deployment_runs_host_image() {
+  local namespace="$1"
+  local deployment="$2"
+  local image="$3"
+  local expected_image_id running_image_ids
+  expected_image_id="$(docker image inspect "$image" --format '{{.Id}}' 2>/dev/null)" \
+    || return 1
+  running_image_ids="$(kubectl --context "$SANDBOX_KUBE_CONTEXT" \
+    --namespace "$namespace" get pods \
+    -l "app.kubernetes.io/name=$deployment" \
+    -o jsonpath='{range .items[*].status.containerStatuses[*]}{.imageID}{"\n"}{end}' \
+    2>/dev/null)" || return 1
+  grep -Fx "$expected_image_id" <<<"$running_image_ids" >/dev/null
+}
+
+delete_failed_initialization_jobs() {
+  local namespace job failed
+  while read -r namespace job; do
+    failed="$(kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace "$namespace" \
+      get job "$job" -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' \
+      2>/dev/null || true)"
+    if [ "$failed" = True ]; then
+      printf 'recreating failed initialization Job %s/%s\n' "$namespace" "$job"
+      kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace "$namespace" \
+        delete job "$job" --wait=true
+    fi
+  done <<'EOF'
+sandbox-system sandbox-object-store-init
+sandbox-workloads sandbox-workspace-init
+EOF
+}
+
+apply_local_overlay() {
+  local output result
+  output="$(mktemp "${TMPDIR:-/tmp}/sandbox-kustomize.XXXXXX")"
+  set +e
+  kubectl --context "$SANDBOX_KUBE_CONTEXT" apply \
+    -k "$REPO_ROOT/overlays/local" 2>&1 | tee "$output"
+  result="${PIPESTATUS[0]}"
+  set -e
+  if [ "$result" -ne 0 ] && grep -q 'field is immutable' "$output"; then
+    printf 'initialization Job template changed; recreating the immutable Jobs\n'
+    kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-system \
+      delete job sandbox-object-store-init --ignore-not-found --wait=true
+    kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-workloads \
+      delete job sandbox-workspace-init --ignore-not-found --wait=true
+    kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -k "$REPO_ROOT/overlays/local"
+    result=$?
+  fi
+  rm -f "$output"
+  return "$result"
+}
+
 deploy_local_profile() {
   export KUBECONFIG="$SANDBOX_KUBECONFIG"
+  local system_deployments_to_restart=()
+  local restart_volume_deployment=0
+  local deployment image
+  for deployment in sandbox-control-plane sandbox-console; do
+    if [ "$deployment" = sandbox-control-plane ]; then
+      image=sandbox-control-plane:0.7.0
+    else
+      image=sandbox-console:0.1.0
+    fi
+    if kubectl --context "$SANDBOX_KUBE_CONTEXT" -n sandbox-system get \
+      deployment "$deployment" >/dev/null 2>&1 \
+      && ! deployment_runs_host_image sandbox-system "$deployment" "$image"; then
+      system_deployments_to_restart+=("deployment/$deployment")
+    fi
+  done
+  if kubectl --context "$SANDBOX_KUBE_CONTEXT" -n sandbox-workloads get \
+    deployment sandbox-volume >/dev/null 2>&1 \
+    && ! deployment_runs_host_image sandbox-workloads sandbox-volume \
+      sandbox-control-plane:0.7.0; then
+    restart_volume_deployment=1
+  fi
   kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -f \
     https://raw.githubusercontent.com/rancher/local-path-provisioner/c4fdcada94c2e632cd7d9231e73406d554eb40e2/deploy/local-path-storage.yaml
   kubectl --context "$SANDBOX_KUBE_CONTEXT" -n local-path-storage rollout status \
@@ -227,20 +311,28 @@ deploy_local_profile() {
   kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -f "$REPO_ROOT/k8s/namespaces.yaml"
   SANDBOX_KUBE_CONTEXT="$SANDBOX_KUBE_CONTEXT" bash "$SCRIPT_DIR/bootstrap-local-secrets.sh"
   deploy_ceph_rgw
-  # Both initialization Jobs are idempotent, but Job pod templates are
-  # immutable. Recreate them so upgrades do not fail on an old completed Job.
-  kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-system \
-    delete job sandbox-object-store-init --ignore-not-found --wait=true
-  kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-workloads \
-    delete job sandbox-workspace-init --ignore-not-found --wait=true
-  kubectl --context "$SANDBOX_KUBE_CONTEXT" apply -k "$REPO_ROOT/overlays/local"
+  # Completed initialization Jobs are evidence that this idempotent work is
+  # already done. Preserve them on a normal rerun; recreating both after every
+  # Rook reconciliation raced RGW and made a healthy profile fail. Failed Jobs
+  # are retried, while an actual template change takes the immutable-Job retry
+  # path in apply_local_overlay.
+  delete_failed_initialization_jobs
+  apply_local_overlay
   # Project images use fixed local tags and imagePullPolicy Never. Importing a
   # new image under the same tag does not change the Deployment template, so an
   # existing Pod would otherwise keep running the previous image indefinitely.
-  kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-system \
-    rollout restart deployment/sandbox-control-plane deployment/sandbox-console
-  kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-workloads \
-    rollout restart deployment/sandbox-volume
+  # Fixed tags need an explicit restart on an update. A fresh install has just
+  # created these Pods, however, and restarting the Control Plane immediately
+  # triggers its 210-second graceful shutdown. That made clean installs time
+  # out before the replacement Pod could become Ready.
+  if ((${#system_deployments_to_restart[@]})); then
+    kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-system \
+      rollout restart "${system_deployments_to_restart[@]}"
+  fi
+  if ((restart_volume_deployment)); then
+    kubectl --context "$SANDBOX_KUBE_CONTEXT" --namespace sandbox-workloads \
+      rollout restart deployment/sandbox-volume
+  fi
   kubectl --context "$SANDBOX_KUBE_CONTEXT" -n sandbox-system wait \
     --for=condition=complete job/sandbox-object-store-init --timeout=3m
   kubectl --context "$SANDBOX_KUBE_CONTEXT" -n sandbox-workloads wait \
@@ -277,12 +369,44 @@ destroy_local_profile() {
   done
 }
 
+UP_PHASE=0
+UP_PHASE_COUNT=5
+run_up_phase() {
+  local label="$1"
+  shift
+  local started="$SECONDS"
+  UP_PHASE=$((UP_PHASE + 1))
+  printf '\n[%s/%s] %s\n' "$UP_PHASE" "$UP_PHASE_COUNT" "$label"
+  # A function invoked directly as an `if` condition inherits Bash's
+  # suppression of `set -e`, so an early kubectl failure can be hidden by a
+  # later successful command. Run the phase in its own errexit-enabled shell
+  # and inspect that shell's status instead.
+  set +e
+  (set -e; "$@")
+  local result=$?
+  set -e
+  if [ "$result" -eq 0 ]; then
+    printf '[%s/%s] complete in %ss\n' \
+      "$UP_PHASE" "$UP_PHASE_COUNT" "$((SECONDS - started))"
+  else
+    printf '[%s/%s] failed after %ss: %s\n' \
+      "$UP_PHASE" "$UP_PHASE_COUNT" "$((SECONDS - started))" "$label" >&2
+    if [ -s "$SANDBOX_KUBECONFIG" ]; then
+      printf 'Current cluster state:\n' >&2
+      KUBECONFIG="$SANDBOX_KUBECONFIG" kubectl \
+        --context "$SANDBOX_KUBE_CONTEXT" get pods -A >&2 || true
+    fi
+    return "$result"
+  fi
+}
+
 case "${1:-}" in
   up)
-    require_tools
-    ensure_cluster
-    build_and_load_images
-    deploy_local_profile
+    run_up_phase 'checking required tools and ports' require_tools
+    run_up_phase 'creating or resuming the Lima Kubernetes node' ensure_cluster
+    run_up_phase "building 4 project images ($IMAGE_BUILD_JOBS parallel jobs)" build_images
+    run_up_phase 'loading project and Metrics Server images into containerd' load_images
+    run_up_phase 'deploying storage, Control Plane, Runtime services, and Console' deploy_local_profile
     printf 'Control Plane: http://127.0.0.1:%s\nKubeconfig: %s\n' \
       "$SANDBOX_CONTROL_PLANE_PORT" "$SANDBOX_KUBECONFIG"
     ;;

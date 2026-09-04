@@ -56,7 +56,9 @@ spec:
               deadline = time.monotonic() + 120
               while True:
                   try:
-                      store.list_buckets()
+                      existing_buckets = {
+                          item["Name"] for item in store.list_buckets().get("Buckets", [])
+                      }
                       break
                   except (ClientError, BotoCoreError) as error:
                       if time.monotonic() >= deadline:
@@ -70,12 +72,13 @@ spec:
                   "OBJECT_STORE_WORKSPACE_BUCKET",
               ):
                   bucket = os.environ[variable]
-                  try:
+                  # RGW checks the user's max-bucket quota before checking
+                  # whether CreateBucket names an existing bucket. Once all
+                  # three local buckets exist, blindly creating them again can
+                  # return TooManyBuckets instead of AlreadyOwnedByYou.
+                  if bucket not in existing_buckets:
                       store.create_bucket(Bucket=bucket)
-                  except ClientError as error:
-                      code = error.response.get("Error", {}).get("Code", "")
-                      if code not in ("BucketAlreadyExists", "BucketAlreadyOwnedByYou"):
-                          raise
+                      existing_buckets.add(bucket)
                   store.put_bucket_versioning(
                       Bucket=bucket,
                       VersioningConfiguration={"Status": "Enabled"},

@@ -98,6 +98,20 @@ sandbox-workloads/sandbox-public-egress
 POLICIES
 }
 
+expected_policies_for_cluster() {
+  # The portable/Helm profile includes PostgreSQL, while the independent local
+  # kubeadm profile deliberately patches Control Plane to SQLite and therefore
+  # does not render a PostgreSQL workload or its ingress policy. Keep the full
+  # inventory above as the source-contract list, then adapt only the live-cluster
+  # assertion to what this installed profile actually contains.
+  if kubectl "${KUBECTL_ARGS[@]}" --namespace sandbox-system \
+    get service sandbox-postgres >/dev/null 2>&1; then
+    expected_policies
+  else
+    expected_policies | grep -v '^sandbox-system/sandbox-postgres-ingress$'
+  fi
+}
+
 actual_policies() {
   local namespace
   for namespace in sandbox-system sandbox-workloads; do
@@ -109,7 +123,7 @@ actual_policies() {
 
 # One direction only. A policy nobody expected is an operator adding their own
 # and is not this script's business; a policy that should be there and is not is.
-missing_policies="$(comm -23 <(expected_policies | sort) <(actual_policies | sort))"
+missing_policies="$(comm -23 <(expected_policies_for_cluster | sort) <(actual_policies | sort))"
 if [[ -n "${missing_policies}" ]]; then
   echo "missing NetworkPolicy:" >&2
   printf '  %s\n' ${missing_policies} >&2

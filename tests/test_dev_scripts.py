@@ -189,11 +189,29 @@ class DevelopmentScriptTests(unittest.TestCase):
         for relative in (
             "scripts/local-cluster.sh",
             "scripts/dev-doctor.sh",
+            "scripts/build-image.sh",
+            "scripts/quickstart.sh",
+            "scripts/verify.sh",
             "scripts/print-dev-token.sh",
             "scripts/bootstrap-local-secrets.sh",
         ):
             with self.subTest(path=relative):
                 subprocess.run(["bash", "-n", str(ROOT / relative)], check=True)
+
+    def test_quickstart_uses_the_standalone_kubeadm_profile(self) -> None:
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        quickstart = (ROOT / "scripts/quickstart.sh").read_text(encoding="utf-8")
+        cluster = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
+        combined = "\n".join((makefile, quickstart, cluster))
+        self.assertIn("scripts/local-cluster.sh up", makefile)
+        self.assertIn("kubeadm init", cluster)
+        for forbidden in (
+            "kind create cluster",
+            "kind delete cluster",
+            "kindest/node",
+            "helm/kind-action",
+        ):
+            self.assertNotIn(forbidden, combined)
 
     def test_existing_secret_migrates_the_previous_control_token_without_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
