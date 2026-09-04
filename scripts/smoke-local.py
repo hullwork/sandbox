@@ -153,7 +153,8 @@ def main() -> int:
     print(f"First Runtime call: {first_call_seconds:.3f}s")
     print(f"Value proof total: {duration:.3f}s")
     print(f"Evidence: {result_path}")
-    print("Console: run `make console-forward`, then open http://127.0.0.1:18081")
+    print("Console: run `make console-forward`, open http://127.0.0.1:18081,")
+    print("then paste the value from `make --no-print-directory dev-token` into API key")
     return 0
 
 

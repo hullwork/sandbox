@@ -48,7 +48,7 @@ operation fails; it never falls back to running on the host.
 
 ```bash
 make bootstrap                 # create .venv and install SDK + test dependencies
-make test                      # 833 unit and contract tests, no network, no cluster
+make test                      # 834 unit and contract tests, no network, no cluster
 make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```
@@ -146,6 +146,25 @@ Lima cluster, and proves all of the following against the live deployment:
 - a Workspace file survives stopping and replacing its Runtime;
 - an unavailable Control Plane fails closed without executing on the host;
 - `/healthz`, `X-Request-Id`, and Prometheus metrics are visible.
+
+### Open the Console
+
+After `make quickstart` succeeds, keep the Console forward running in one terminal:
+
+```bash
+make console-forward
+```
+
+Open <http://127.0.0.1:18081>. In another terminal, print the local login key:
+
+```bash
+make --no-print-directory dev-token
+```
+
+Paste that value into **API key** and choose **Enter console**. The local key is
+administrator-equivalent: do not share it or put it in a URL. The Console retains it
+only in that browser tab's `sessionStorage`; signing out or closing the tab removes it.
+Production deployments should use OIDC or a revocable API key instead.
 
 The command ends with the first Runtime-call latency and total elapsed time. It
 also writes `.sandbox/quickstart-summary.json` and

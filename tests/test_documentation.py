@@ -142,6 +142,16 @@ class DocumentationTests(unittest.TestCase):
         auth_source = (ROOT / "console/src/auth.ts").read_text(encoding="utf-8")
         self.assertIn("window.sessionStorage.setItem", auth_source)
 
+    def test_readme_closes_the_local_console_login_loop(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        heading = readme.index("### Open the Console")
+        section = readme[heading:readme.index("\n## ", heading + 4)]
+        self.assertIn("make console-forward", section)
+        self.assertIn("http://127.0.0.1:18081", section)
+        self.assertIn("make --no-print-directory dev-token", section)
+        self.assertIn("API key", section)
+        self.assertIn("administrator-equivalent", section)
+
     def test_dev_token_make_target_does_not_echo_its_recipe(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         target = makefile.split("dev-token:", 1)[1].split("\n\n", 1)[0]
