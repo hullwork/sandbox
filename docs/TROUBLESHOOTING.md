@@ -12,8 +12,8 @@ export KUBECONFIG="$PWD/.sandbox/kubeconfig"
 ## `make doctor` cannot reach Docker or reports insufficient capacity
 
 **Symptom.** The first quickstart phase stops before creating a VM because the
-Docker daemon is unreachable, available memory is below 8 GiB, or free space under
-`$LIMA_HOME` is below 35 GiB for a new profile. Reusing an existing `sandbox-local`
+Docker daemon is unreachable, available memory is below 6.5 GiB, or free space under
+`$LIMA_HOME` is below 25 GiB for a new profile. Reusing an existing `sandbox-local`
 profile lowers the capacity gate to 2 GiB memory and 5 GiB disk.
 
 **Fix.** On macOS, start Docker Desktop (`open -a Docker`) and wait until it is

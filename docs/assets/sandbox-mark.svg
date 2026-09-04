@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">Sandbox Platform</title>
+  <defs>
+    <linearGradient id="g" x1="8" y1="7" x2="55" y2="58" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a7ff83"/>
+      <stop offset="1" stop-color="#35e6b0"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.5" y="1.5" width="61" height="61" rx="17" fill="#0d1315" stroke="#263337" stroke-width="3"/>
+  <path d="M17 22.5 32 14l15 8.5v18L32 49l-15-8.5v-18Z" fill="none" stroke="url(#g)" stroke-width="3.5" stroke-linejoin="round"/>
+  <path d="m17.5 23 14.5 8.4L46.5 23M32 31.5V48" fill="none" stroke="url(#g)" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="32" cy="31.5" r="3.3" fill="#a7ff83"/>
+</svg>

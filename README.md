@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+[Website](https://hullwork.github.io/sandbox/) · [Documentation](docs/README.md) · [Benchmark report](docs/BENCHMARK_REPORT_2026-09-01.md)
+
 **Run an agent's shell and file operations inside a gVisor Pod on your own
 Kubernetes cluster.** A Control Plane owns Workspaces, quotas and credentials.
 Agents reach it through a Python SDK, the `sandbox` CLI, or a stdio MCP bridge —
@@ -48,7 +50,7 @@ operation fails; it never falls back to running on the host.
 
 ```bash
 make bootstrap                 # create .venv and install SDK + test dependencies
-make test                      # 834 unit and contract tests, no network, no cluster
+make test                      # 839 unit and contract tests, no network, no cluster
 make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```
@@ -200,8 +202,8 @@ it first rather than discovering a gap halfway through the VM build.
 | Python | 3.11 or newer |
 | Host OS | macOS or Linux |
 | Host architecture | amd64 or arm64 (`scripts/local-cluster.yaml` pins Ubuntu images for both; gVisor is installed for `x86_64` and `aarch64`) |
-| **Available memory** | **8 GiB free** for a new profile — a hard check, not a warning |
-| **Free disk** | **35 GiB free** under `$LIMA_HOME` (default `~/.lima`) for a new profile — also a hard check |
+| **Available memory** | **6.5 GiB free** for a new profile — the default VM reserves 6 GiB; this is a hard check, not a warning |
+| **Free disk** | **25 GiB free** under `$LIMA_HOME` (default `~/.lima`) for a new profile — the 60 GiB VM disk is sparse; this is also a hard check |
 | Virtualization | On Linux, a readable and writable `/dev/kvm`. Without it Lima falls back to QEMU TCG software emulation, which boots kubeadm many times slower and is not usable in practice. `make doctor` warns rather than fails on this one. |
 | Network | Egress to pull the Ubuntu cloud image, Kubernetes apt packages, Cilium, gVisor, Metrics Server, and Rook/Ceph images |
 

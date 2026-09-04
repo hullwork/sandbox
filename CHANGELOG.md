@@ -8,6 +8,9 @@ Versioning after its first public release.
 
 ### Added
 
+- A zero-build, responsive GitHub Pages homepage under `docs/` that presents the
+  measured benchmark, fail-closed boundary, kubeadm quickstart, and architecture
+  without depending on another repository or third-party frontend assets.
 - Standalone local gVisor environment, Python SDK, CLI, stdio MCP, and operator Console
   surfaces for the first public release candidate.
 - `make destroy-local`, a KUBECONFIG-aware Makefile, and resource checks in `make doctor`.
@@ -98,6 +101,9 @@ Versioning after its first public release.
 
 ### Fixed
 
+- The new-profile doctor gate now reflects the default 6 GiB VM and sparse disk's
+  measured physical footprint (6.5 GiB available memory / 25 GiB free disk), so a
+  capable host is not rejected solely by the virtual disk's 60 GiB maximum size.
 - Findings of the 2026-09-02 pre-release review, in four groups. Control plane:
   request handling, admission and readiness defects found by reading the API
   and store paths. Lifecycle: Runtime, workspace and checkpoint state transitions
