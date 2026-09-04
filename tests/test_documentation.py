@@ -127,6 +127,10 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn(f"{size} GiB disk by default", readme)
         self.assertIn(f"its {size} GiB disk", readme)
         self.assertIn(f"a {size} GiB disk", doctor)
+        self.assertIn("DEFAULT_MIN_MEMORY_GIB=6.5", doctor)
+        self.assertIn("DEFAULT_MIN_DISK_GIB=25", doctor)
+        self.assertIn("**6.5 GiB free**", readme)
+        self.assertIn("**25 GiB free**", readme)
 
     def test_mysql_driver_documentation_matches_the_image(self) -> None:
         dockerfile = (ROOT / "control_plane/Dockerfile").read_text(encoding="utf-8")

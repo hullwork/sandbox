@@ -52,7 +52,7 @@ proof. It records phase timing and outcome in
 `.sandbox/quickstart-summary.json`. Use `make up-local` directly when the Python
 environment is already prepared and only the deployment needs updating.
 
-For a new profile, `make doctor` fails when less than 8 GiB of memory or 35 GiB
+For a new profile, `make doctor` fails when less than 6.5 GiB of memory or 25 GiB
 of disk is free. When the dedicated `sandbox-local` VM already exists, it uses a
 2 GiB memory / 5 GiB disk reuse gate instead. It
 warns when `/dev/kvm` is absent on Linux (Lima then falls back to QEMU software

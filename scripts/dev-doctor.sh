@@ -57,7 +57,9 @@ if [ "$(uname -s)" = Linux ]; then
 fi
 
 # A new default VM reserves 6 GiB of memory and a 60 GiB disk (sparse)
-# (scripts/local-cluster.sh), so a clean install needs substantial headroom.
+# (scripts/local-cluster.sh). The reference clean install consumes under 15 GiB
+# of physical host storage; 6.5/25 keeps a real safety margin without rejecting a
+# host that can run the profile merely because the sparse virtual size is 60 GiB.
 # Reusing an existing VM only needs enough headroom to build images and roll
 # Pods; applying the new-VM threshold after a successful install made retries
 # fail precisely because the VM was already consuming those resources.
@@ -67,8 +69,8 @@ if [ "${SANDBOX_DOCTOR_SKIP_RESOURCES:-0}" = 1 ]; then
 else
   LIMA_DISK_DIR="${LIMA_HOME:-$HOME/.lima}"
   [ -d "$LIMA_DISK_DIR" ] || LIMA_DISK_DIR="$HOME"
-  DEFAULT_MIN_MEMORY_GIB=8
-  DEFAULT_MIN_DISK_GIB=35
+  DEFAULT_MIN_MEMORY_GIB=6.5
+  DEFAULT_MIN_DISK_GIB=25
   RESOURCE_MODE=new-profile
   if limactl list --format '{{.Name}}' 2>/dev/null \
     | grep -Fx "${SANDBOX_LOCAL_VM:-sandbox-local}" >/dev/null; then

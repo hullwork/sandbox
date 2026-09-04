@@ -2,6 +2,10 @@
 
 Sandbox Platform provides an execution-as-a-service boundary for agents: a Control Plane, gVisor Runtime, workspace volume services, official Python SDK, and MCP bridge. Start with the [README](../README.md), then use the documents below.
 
+The project homepage is the zero-build static site in [index.html](index.html).
+GitHub Pages serves this directory from `main:/docs`; assets stay repository-local
+so the public site has no runtime dependency on a separate project or frontend build.
+
 | Document | Audience | Use it for |
 | --- | --- | --- |
 | [README](../README.md) | All users | Product scope, quick start, architecture summary, and current status |

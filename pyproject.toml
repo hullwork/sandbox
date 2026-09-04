@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hullwork/sandbox"
+Homepage = "https://hullwork.github.io/sandbox/"
 Repository = "https://github.com/hullwork/sandbox"
 Issues = "https://github.com/hullwork/sandbox/issues"
 
