@@ -87,7 +87,7 @@ jobs:
           /tmp/sandbox-license-inventory/bin/python scripts/generate-license-inventory.py \
             --json dist/licenses.json --markdown dist/licenses.md
       - name: Scan source dependencies
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -98,7 +98,7 @@ jobs:
           format: table
           output: dist/source-security.txt
       - name: Generate source SBOM
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -187,7 +187,7 @@ jobs:
           provenance: false
           sbom: false
       - name: Scan staged image before promotion
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.staging }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
@@ -197,7 +197,7 @@ jobs:
           format: table
           output: image-${{ matrix.name }}-security.txt
       - name: Generate image SBOM
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.image.outputs.staging }}@${{ steps.build.outputs.digest }}
           format: cyclonedx
