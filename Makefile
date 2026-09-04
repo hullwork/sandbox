@@ -93,6 +93,8 @@ control-plane-forward: ## — forward the Sandbox Control Plane API to 127.0.0.1
 		port-forward deploy/sandbox-control-plane 18080:8080
 
 console-forward: ## — forward Console to 127.0.0.1:18081
+	@echo "Console: http://127.0.0.1:18081"
+	@echo "Local login key (run in another terminal): make --no-print-directory dev-token"
 	KUBECONFIG=$(KUBECONFIG) kubectl --context $(SANDBOX_KUBE_CONTEXT) --namespace sandbox-system \
 		port-forward deploy/sandbox-console 18081:8080
 

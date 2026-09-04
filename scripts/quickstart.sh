@@ -97,3 +97,12 @@ run_phase local-cluster make -C "$REPO_ROOT" --no-print-directory up-local
 run_phase value-proof make -C "$REPO_ROOT" --no-print-directory smoke-local
 STATUS=passed
 CURRENT_PHASE=complete
+
+cat <<'EOF'
+
+Open the Console:
+  1. Run `make console-forward` in one terminal.
+  2. Open http://127.0.0.1:18081.
+  3. Run `make --no-print-directory dev-token` in another terminal and paste
+     the value into "API key". The local key is administrator-equivalent.
+EOF
