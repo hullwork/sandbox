@@ -1,5 +1,6 @@
 # Standalone deployment surface for this repository.
-# The only cluster profile is single-VM Lima + kubeadm + Cilium + gVisor.
+# The local profile is one Lima + kubeadm cluster: trusted system services on
+# the control-plane node, gVisor Runtime workloads on a scalable tainted worker pool.
 # Image build contexts are deliberately rooted in this repository.
 SHELL := /usr/bin/env bash
 SANDBOX_KUBE_CONTEXT ?= sandbox-local
@@ -20,7 +21,7 @@ SANDBOX_BUILD_LOG_DIR ?= $(SANDBOX_STATE_DIR)/logs/images
 DOCKER_BUILD_PROGRESS ?= plain
 SANDBOX_BOOTSTRAP_STAMP ?= .venv/.sandbox-bootstrap
 
-.PHONY: help bootstrap quickstart acceptance smoke-local e2e-local verify verify-manifests doctor images image-runtime image-file-service image-control-plane image-console test chart-lint chart-render dev-token control-plane-forward console-forward up-local status-local down-local destroy-local
+.PHONY: help bootstrap quickstart acceptance smoke-local e2e-local verify verify-manifests doctor images image-runtime image-file-service image-control-plane image-console test chart-lint chart-render dev-token control-plane-forward console-forward up-local status-local scale-workers down-local destroy-local
 
 help:
 	@grep -E '^[a-z-]+:.* — ' Makefile | sed 's/:.* — / — /'
@@ -49,6 +50,7 @@ smoke-local: ## — prove gVisor isolation, persistence, fail-closed behavior, a
 e2e-local: ## — run all network, Runtime, storage, restart, and adversarial E2E checks
 	SANDBOX_KUBECONFIG=$(KUBECONFIG) \
 	SANDBOX_KUBE_CONTEXT=$(SANDBOX_KUBE_CONTEXT) \
+	SANDBOX_EXPECT_DEDICATED_RUNTIME_NODE=1 \
 	PYTHON=$(SANDBOX_PYTHON) bash scripts/run-all-e2e.sh
 
 verify: ## — run the complete source, package, Console, and manifest gate with logs
@@ -104,8 +106,12 @@ up-local: ## — deploy the standalone Lima/kubeadm environment
 status-local: ## — show the standalone Lima/kubeadm environment
 	bash scripts/local-cluster.sh status
 
-down-local: ## — stop the Lima VM and retain its disk
+scale-workers: ## — resize the Runtime worker pool with WORKERS=N
+	@test -n "$(WORKERS)" || { echo 'usage: make scale-workers WORKERS=N' >&2; exit 2; }
+	bash scripts/local-cluster.sh scale-workers "$(WORKERS)"
+
+down-local: ## — stop the control plane and all Runtime workers; retain disks
 	bash scripts/local-cluster.sh down
 
-destroy-local: ## — delete the Lima VM, .sandbox state, and local images
+destroy-local: ## — delete all profile VMs, .sandbox state, and local images
 	bash scripts/local-cluster.sh destroy

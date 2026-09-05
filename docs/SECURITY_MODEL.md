@@ -53,8 +53,10 @@ unbounded Runtime lifetime, and accidental host fallback when Sandbox is unavail
 - The operator console is not a secret store and must sit behind an authenticated
   administrative ingress.
 - The `shared` storage mode weakens storage isolation and quota semantics.
-- The local overlay deliberately uses SQLite and single-node storage; it validates
-  gVisor isolation but not production durability or high availability.
+- The local overlay deliberately uses SQLite and single-OSD Ceph. Its scalable,
+  tainted Runtime worker pool validates placement and gVisor isolation, but
+  the two nodes remain in one Kubernetes trust domain and do not prove production
+  durability or high availability.
 - Side-channel resistance, malicious kernel exploits beyond gVisor's guarantees,
   and public anonymous multi-tenancy are not claimed.
 

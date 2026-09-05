@@ -13,14 +13,21 @@ not supported until a versioned compatibility suite proves otherwise.
 | Console | Node.js 22 build environment | Locked npm install, i18n, ESLint, TypeScript, and production build |
 | Kubernetes manifests | Provider-neutral base, local integration, EKS | Kustomize render and contract tests |
 
+The currently validated local integration stack is kubeadm/Kubernetes 1.36,
+Cilium 1.19.6, Rook 1.20.6, Ceph 20.2.4, and Ceph-CSI 3.17.1 on Ubuntu Noble.
+Rook and Ceph-CSI are separate checksum-pinned Helm charts; the Ceph and Ceph-CSI
+images are digest-pinned. Noble's 6.8 kernel uses the CephFS FUSE mounter in this
+profile. Treat any change to that tuple as a compatibility change that requires
+the full local E2E suite.
+
 ## Compatibility rules
 
 - Kubernetes must support RuntimeClass, NetworkPolicy, batch/v1 Jobs/CronJobs,
   leases, and the storage access mode selected by the overlay.
 - The `gvisor` RuntimeClass must resolve to a working `runsc` handler on every node
   eligible for Runtime Pods. An object alone is not proof of isolation.
-- Production deployments must replace development SQLite, the single-node Ceph
-  profile, and local-path storage with the dependencies and backup policies in
+- Production deployments must replace development SQLite and the single-OSD Ceph
+  profile with the dependencies and backup policies in
   [Production](PRODUCTION.md).
 - The local profile provides Metrics Server only through its overlay. Production must
   provide its own Metrics API and trusted kubelet serving certificate path.

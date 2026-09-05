@@ -8,4 +8,3 @@ resources:
 
 patches:
   - path: control-plane-sqlite.yaml
-  - path: workspace-storage-local-path.yaml

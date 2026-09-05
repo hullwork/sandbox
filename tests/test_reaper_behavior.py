@@ -785,6 +785,14 @@ class IdleEvictionTests(unittest.TestCase):
         self.assertEqual(kube.deleted("pods"), [])
         self.assertEqual(kube.list_calls, 1)
 
+    def test_zero_capacity_rejects_without_creating_a_runtime(self) -> None:
+        helpers, kube = self.helpers([])
+        with self.assertRaises(KubeError) as raised:
+            helpers["_admit_new_runtime"](0)
+        self.assertEqual(raised.exception.status, HTTPStatus.TOO_MANY_REQUESTS)
+        self.assertIn("(0/0)", str(raised.exception))
+        self.assertEqual(kube.deleted("pods"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

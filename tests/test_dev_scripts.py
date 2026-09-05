@@ -35,9 +35,9 @@ def fake_tool_directory(directory: str, *, omit: tuple[str, ...] = ()) -> str:
     return directory
 
 
-def make_dry_run(target: str) -> str:
+def make_dry_run(target: str, *variables: str) -> str:
     return subprocess.run(
-        ["make", "--no-print-directory", "-n", target],
+        ["make", "--no-print-directory", "-n", target, *variables],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -205,6 +205,10 @@ class DevelopmentScriptTests(unittest.TestCase):
         combined = "\n".join((makefile, quickstart, cluster))
         self.assertIn("scripts/local-cluster.sh up", makefile)
         self.assertIn("kubeadm init", cluster)
+        self.assertIn(
+            "${SANDBOX_LOCAL_CONTROL_PLANE_PORT:-18080}",
+            quickstart,
+        )
         for forbidden in (
             "kind create cluster",
             "kind delete cluster",
@@ -212,6 +216,83 @@ class DevelopmentScriptTests(unittest.TestCase):
             "helm/kind-action",
         ):
             self.assertNotIn(forbidden, combined)
+
+    def test_local_kubeadm_profile_has_a_scalable_runtime_worker_pool(self) -> None:
+        script = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
+        lima = (ROOT / "scripts/local-cluster.yaml").read_text(encoding="utf-8")
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn('RUNTIME_WORKER_COUNT="${SANDBOX_LOCAL_WORKER_COUNT:-1}"', script)
+        self.assertIn('CLUSTER_NETWORK="${SANDBOX_LOCAL_NETWORK:-${CONTROL_PLANE_VM}-net}"', script)
+        self.assertIn('limactl network create "$CLUSTER_NETWORK"', script)
+        self.assertIn("--mode=user-v2 --gateway=", script)
+        self.assertIn("range(108, 224)", script)
+        self.assertIn("SANDBOX_LOCAL_NETWORK_GATEWAY", script)
+        self.assertIn('--network "lima:$CLUSTER_NETWORK"', script)
+        self.assertIn("verify_vm_network", script)
+        self.assertIn('limactl network delete --force "$CLUSTER_NETWORK"', script)
+        self.assertIn("kubeadm token create", script)
+        self.assertIn("ensure_kubeadm_prerequisites", script)
+        self.assertIn("/mnt/lima-cidata/provision.system/00000000", script)
+        self.assertIn("Acquire::Retries=5", lima)
+        self.assertIn("--retry-all-errors", lima)
+        self.assertIn("--print-join-command", script)
+        self.assertIn('sudo sh -c "$join_command"', script)
+        self.assertIn("scale-workers)", script)
+        self.assertIn("active Runtime Pods are still scheduled there", script)
+        self.assertIn("kubectl --context \"$SANDBOX_KUBE_CONTEXT\" drain", script)
+        self.assertIn("scale_local_capacity", script)
+        self.assertIn('SANDBOX_LOCAL_WORKER_COUNT="$desired"', script)
+        self.assertIn("wait_for_ceph_csi", script)
+        self.assertIn("daemonset/rook-ceph.cephfs.csi.ceph.com-nodeplugin", script)
+        self.assertIn("wait_for_kubernetes_api", script)
+        self.assertIn("remove_stale_worker_nodes", script)
+        self.assertIn("remove_worker_node_registration", script)
+        self.assertIn('delete node "$runtime_node"', script)
+        self.assertIn('--field-selector="spec.nodeName=$runtime_node"', script)
+        self.assertLess(
+            script.index('write_kubeconfig "$api_ip"'),
+            script.index("wait_for_kubernetes_api", script.index('write_kubeconfig "$api_ip"')),
+        )
+        self.assertIn("SANDBOX_MAX_RUNTIMES", script)
+        self.assertIn("patch resourcequota sandbox-workload-quota", script)
+        self.assertIn("max_runtimes=$((4 * RUNTIME_WORKER_COUNT))", script)
+        self.assertNotIn('for worker_index in $(seq 1 "$RUNTIME_WORKER_COUNT")', script)
+        self.assertIn('local -a workers_to_stop=()', script)
+        self.assertIn('if ((${#workers_to_stop[@]})); then', script)
+        ensure_worker = script[script.index("ensure_runtime_worker()") : script.index("ensure_cluster()")]
+        self.assertLess(
+            ensure_worker.index('cordon "$runtime_node"'),
+            ensure_worker.index('label node "$runtime_node"'),
+        )
+        self.assertLess(
+            script.index('workers_to_stop+=("$runtime_vm")'),
+            script.index('for runtime_vm in "${workers_to_stop[@]}"'),
+        )
+        self.assertIn('nodes_to_uncordon_on_failure+=("$runtime_node")', script)
+        self.assertIn("a Runtime Pod reached the node during scale-down preflight", script)
+        doctor = (ROOT / "scripts/dev-doctor.sh").read_text(encoding="utf-8")
+        self.assertIn('CONTROL_PLANE_MEMORY_GIB="${SANDBOX_LOCAL_MEMORY_GIB:-6}"', doctor)
+        self.assertIn('RUNTIME_MEMORY_GIB="${SANDBOX_LOCAL_WORKER_MEMORY_GIB:-4}"', doctor)
+        self.assertIn("WORKER_MEMORY_RESERVE * $MISSING_WORKERS", doctor)
+        self.assertIn("CONTROL_DISK_RESERVE + $WORKER_DISK_RESERVE", doctor)
+        self.assertIn("make scale-workers", (ROOT / "README.md").read_text())
+        self.assertIn("scale-workers:", makefile)
+        self.assertIn(
+            'scripts/local-cluster.sh scale-workers "2"',
+            make_dry_run("scale-workers", "WORKERS=2"),
+        )
+
+    def test_local_profile_loads_only_runtime_image_on_workers(self) -> None:
+        script = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
+        worker_loop = script[script.index("load_images()") : script.index("deploy_ceph_rgw()")]
+        self.assertIn('runtime_vm="$(runtime_vm_name "$worker_index")"', worker_loop)
+        self.assertIn('load_image sandbox-runtime:0.5.0 "$runtime_vm"', worker_loop)
+        self.assertLess(
+            worker_loop.index('load_image sandbox-runtime:0.5.0 "$runtime_vm"'),
+            worker_loop.index('uncordon "$runtime_node"'),
+        )
+        self.assertNotIn('sandbox-console:0.1.0 "$(runtime_vm_name', worker_loop)
+        self.assertNotIn('sandbox-control-plane:0.7.0 "$(runtime_vm_name', worker_loop)
 
     def test_existing_secret_migrates_the_previous_control_token_without_rotation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

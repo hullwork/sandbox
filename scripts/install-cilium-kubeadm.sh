@@ -6,7 +6,6 @@ CLUSTER="${1:?usage: install-cilium-kubeadm.sh <cluster>}"
 CILIUM_VERSION="${CILIUM_VERSION:-1.19.6}"
 CILIUM_CHART_SHA256="${CILIUM_CHART_SHA256:-21c43cf53841f9ab0375047d95aa4c64051ea52bbd2c679416e6408f5f1c9179}"
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${KUBECONFIG:?set KUBECONFIG to the target kubeadm cluster configuration}"
 # The default-value branch creates an ordinary shell variable that Helm cannot
 # see in its child process; export KUBECONFIG explicitly.
@@ -41,8 +40,9 @@ if [[ "${ACTUAL_CHART_SHA256}" != "${CILIUM_CHART_SHA256}" ]]; then
   exit 1
 fi
 
-# Two operator replicas on a single-node cluster cannot satisfy anti-affinity.
-#helm --wait; --set-string prevents helm from parsing false as a boolean instead of a string.
+# One operator replica keeps the local profile lightweight as workers scale up
+# and down; the Cilium agent itself remains a DaemonSet on every active node.
+# helm --wait; --set-string prevents Helm from parsing false as a boolean.
 helm --kube-context "${CLUSTER}" upgrade --install cilium "${CHART_FILE}" \
   --namespace kube-system \
   --set routingMode=tunnel --set tunnelProtocol=vxlan \

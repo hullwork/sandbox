@@ -11,10 +11,28 @@ CURRENT_PHASE=initialization
 PROFILE_MODE=created
 PHASE_RESULTS=()
 
-if command -v limactl >/dev/null 2>&1 \
-  && limactl list --format '{{.Name}}' 2>/dev/null \
-    | grep -Fx "${SANDBOX_LOCAL_VM:-sandbox-local}" >/dev/null; then
-  PROFILE_MODE=reused
+# The Lima host port is configurable, so the value proof must follow the same
+# endpoint unless the caller explicitly supplied a different API URL.
+export SANDBOX_CONTROL_PLANE_URL="${SANDBOX_CONTROL_PLANE_URL:-http://127.0.0.1:${SANDBOX_LOCAL_CONTROL_PLANE_PORT:-18080}}"
+
+if command -v limactl >/dev/null 2>&1; then
+  CONTROL_PLANE_VM="${SANDBOX_LOCAL_VM:-sandbox-local}"
+  RUNTIME_VM_PREFIX="${SANDBOX_LOCAL_WORKER_PREFIX:-${CONTROL_PLANE_VM}-w}"
+  RUNTIME_WORKER_COUNT="${SANDBOX_LOCAL_WORKER_COUNT:-1}"
+  VM_NAMES="$(limactl list --format '{{.Name}}' 2>/dev/null || true)"
+  EXISTING_WORKERS=0
+  if [[ "$RUNTIME_WORKER_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    for WORKER_INDEX in $(seq 1 "$RUNTIME_WORKER_COUNT"); do
+      grep -Fx "${RUNTIME_VM_PREFIX}${WORKER_INDEX}" <<<"$VM_NAMES" >/dev/null \
+        && EXISTING_WORKERS=$((EXISTING_WORKERS + 1))
+    done
+  fi
+  if grep -Fx "$CONTROL_PLANE_VM" <<<"$VM_NAMES" >/dev/null \
+    && [ "$EXISTING_WORKERS" = "$RUNTIME_WORKER_COUNT" ]; then
+    PROFILE_MODE=reused
+  elif grep -Fx "$CONTROL_PLANE_VM" <<<"$VM_NAMES" >/dev/null; then
+    PROFILE_MODE=expanded
+  fi
 fi
 
 mkdir -p "$STATE_DIR"

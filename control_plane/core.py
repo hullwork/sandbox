@@ -638,10 +638,11 @@ for _name, _value in (
     ("CHECKPOINT_RETENTION_SECONDS", CHECKPOINT_RETENTION_SECONDS),
     ("CHECKPOINT_GC_INTERVAL_SECONDS", CHECKPOINT_GC_INTERVAL_SECONDS),
     ("SANDBOX_MAX_WORKSPACES", MAX_WORKSPACES),
-    ("SANDBOX_MAX_RUNTIMES", MAX_RUNTIMES),
 ):
     if _value <= 0:
         raise ValueError(f"{_name} must be greater than zero")
+if MAX_RUNTIMES < 0:
+    raise ValueError("SANDBOX_MAX_RUNTIMES must be zero or greater")
 MAX_CONCURRENT_OBJECT_OPS = int(
     os.getenv("SANDBOX_MAX_CONCURRENT_OBJECT_OPS", "1")
 )

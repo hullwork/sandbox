@@ -22,12 +22,15 @@ spec:
   crashCollector:
     disable: true
   storage:
-    useAllNodes: true
+    # The local Runtime worker is intentionally compute-only. The installer
+    # substitutes the trusted control-plane node name before applying this
+    # manifest, so Rook never probes or consumes a Runtime-worker device.
+    useAllNodes: false
     useAllDevices: false
-    # Rook v1.20 deliberately excludes loop devices from deviceFilter matches.
-    # The local preparation DaemonSet deterministically owns this exact device.
-    devices:
-      - name: /dev/loop0
+    nodes:
+      - name: __SANDBOX_CONTROL_PLANE_NODE__
+        devices:
+          - name: /dev/loop0
   disruptionManagement:
     managePodBudgets: false
   priorityClassNames:
@@ -71,3 +74,47 @@ spec:
   displayName: Sandbox Runtime
   quotas:
     maxBuckets: 3
+---
+apiVersion: ceph.rook.io/v1
+kind: CephFilesystem
+metadata:
+  name: sandbox-filesystem
+  namespace: rook-ceph
+spec:
+  metadataPool:
+    replicated:
+      size: 1
+      requireSafeReplicaSize: false
+  dataPools:
+    - name: replicated
+      failureDomain: host
+      replicated:
+        size: 1
+        requireSafeReplicaSize: false
+  metadataServer:
+    activeCount: 1
+    activeStandby: false
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: sandbox-rwx
+provisioner: rook-ceph.cephfs.csi.ceph.com
+parameters:
+  clusterID: rook-ceph
+  fsName: sandbox-filesystem
+  pool: sandbox-filesystem-replicated
+  # Lima's Ubuntu Noble kernel is 6.8 and cannot consume Ceph 20.2.4 AES256K
+  # keys. Keep secure keys and use the matching v3.17.1 userspace client.
+  mounter: fuse
+  csi.storage.k8s.io/provisioner-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/provisioner-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-expand-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-expand-secret-namespace: rook-ceph
+  csi.storage.k8s.io/controller-publish-secret-name: rook-csi-cephfs-provisioner
+  csi.storage.k8s.io/controller-publish-secret-namespace: rook-ceph
+  csi.storage.k8s.io/node-stage-secret-name: rook-csi-cephfs-node
+  csi.storage.k8s.io/node-stage-secret-namespace: rook-ceph
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: Immediate

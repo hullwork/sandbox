@@ -12,7 +12,7 @@ operator-managed template.
 | Isolation class | `gvisor` | `SANDBOX_RUNTIME_CLASS` |
 | Runtime lifetime | 1,800 seconds idle; 43,200 seconds absolute | Control Plane environment |
 | Scoped access token | 900 seconds | `ACCESS_TOKEN_TTL_SECONDS` |
-| Concurrent runtimes | 4 per Control Plane deployment | `SANDBOX_MAX_RUNTIMES` |
+| Concurrent runtimes | 4 by default; local profile scales at 4 per active Runtime worker | `SANDBOX_MAX_RUNTIMES` (`0` pauses admission) |
 | Workspaces | 64 per Control Plane deployment | `SANDBOX_MAX_WORKSPACES` |
 | Workspace request | 1 GiB | `SANDBOX_WORKSPACE_QUOTA` |
 | Shell sessions | 16 per Runtime | `SANDBOX_MAX_SHELL_SESSIONS` |

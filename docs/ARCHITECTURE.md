@@ -112,7 +112,7 @@ or memory snapshots. See [Lifecycle and data](LIFECYCLE_AND_DATA.md).
 
 | Profile | Isolation and dependencies | Intended use |
 | --- | --- | --- |
-| Local integration | gVisor, Cilium, SQLite, local-path Workspace PVC, and cluster-local Ceph RGW | Reproducible isolation and E2E validation |
+| Local integration | gVisor, Cilium, SQLite, CephFS RWX Workspace PVC, and cluster-local Ceph RGW | Reproducible isolation, scaling, and E2E validation |
 | Operator production | gVisor nodes, enforcing CNI, PostgreSQL, external RWX and S3-compatible storage | ACK, EKS, or any conforming Kubernetes platform |
 
 The same Control Plane/Runtime contract applies across profiles. The local profile proves
@@ -149,6 +149,18 @@ provider is selected independently by `SANDBOX_RUNTIME_DRIVER`.
 
 The repository is self-contained: build, test, and local-cluster entrypoints
 resolve paths from this checkout.
+
+The repository-managed local profile uses one kubeadm cluster with a trusted
+control-plane node and a scalable pool of tainted gVisor Runtime workers. This is
+node isolation inside one Kubernetes trust domain, not a dual-cluster claim.
+Workers become schedulable only after node readiness, gVisor installation, and
+Runtime image loading. Scale-down first validates the entire target set and stops
+no node when any target still owns an active Runtime; it cordons and rechecks all
+targets to close the scheduler race, rolling those cordons back on refusal. CephFS RWX makes Workspace
+state independent of worker identity; scaling the pool to zero pauses Runtime
+admission without removing the trusted system and storage node. Stopped worker
+disks are retained, while their ephemeral Kubernetes Node registrations are removed
+and recreated on the next scale-up so node-wide DaemonSet rollouts remain healthy.
 
 Several control-plane modules remain larger than their domain boundaries. Future
 refactors should extract authentication, Workspace, Runtime, object, and admin route

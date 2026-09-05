@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -60,12 +61,34 @@ def record_image_identity(component: str, directory: pathlib.Path) -> None:
         )
         return
     # jq -n --arg a "$A" ... '{k:$a,...,immutableRef:($repository+"@"+$digest)}'
-    match = re.search(
-        r"jq -n((?:\s+--arg \w+ \"\$\w+\"\s*\\?)+)\s*'(\{.*?\})'\s*\\?\s*>\"(.*?)\"",
-        RECORD_STEP["run"], re.S,
+    lines = RECORD_STEP["run"].splitlines()
+    start = next(
+        (index for index, line in enumerate(lines) if line.lstrip().startswith("jq ")),
+        None,
     )
-    assert match, "the jq invocation is not where this fallback looks"
-    arguments = dict(re.findall(r'--arg (\w+) "\$(\w+)"', match.group(1)))
+    assert start is not None, "the jq invocation is not where this fallback looks"
+    command_parts = []
+    for line in lines[start:]:
+        part = line.strip()
+        continued = part.endswith("\\")
+        command_parts.append(part[:-1].strip() if continued else part)
+        if not continued:
+            break
+    command = " ".join(command_parts)
+    assert len(command) <= 4096, "the jq invocation is unexpectedly large"
+    tokens = shlex.split(command)
+    assert tokens[:2] == ["jq", "-n"], "the jq invocation shape changed"
+    arguments = {}
+    cursor = 2
+    while cursor < len(tokens) and tokens[cursor] == "--arg":
+        name, variable = tokens[cursor + 1:cursor + 3]
+        assert variable.startswith("$") and variable[1:].isidentifier()
+        arguments[name] = variable[1:]
+        cursor += 3
+    assert cursor + 1 < len(tokens), "the jq filter or output file is missing"
+    jq_filter = tokens[cursor]
+    output = tokens[cursor + 1]
+    assert output.startswith(">") and len(output) > 1
     values = {
         name: (
             {"runtime": "images.runtime", "file-service": "images.fileService",
@@ -75,7 +98,7 @@ def record_image_identity(component: str, directory: pathlib.Path) -> None:
         for name, variable in arguments.items()
     }
     record = {}
-    for key, expression in re.findall(r"(\w+):(\$\w+|\([^)]*\))", match.group(2)):
+    for key, expression in re.findall(r"(\w+):(\$\w+|\([^)]*\))", jq_filter):
         if expression.startswith("$"):
             record[key] = values[expression[1:]]
         else:
@@ -83,7 +106,7 @@ def record_image_identity(component: str, directory: pathlib.Path) -> None:
                 values[part[1:]] if part.startswith("$") else json.loads(part)
                 for part in re.findall(r'\$\w+|"[^"]*"', expression)
             )
-    target = match.group(3).replace("${COMPONENT}", component)
+    target = output[1:].replace("${COMPONENT}", component)
     (directory / target).write_text(json.dumps(record), encoding="utf-8")
 
 

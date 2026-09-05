@@ -12,9 +12,10 @@ export KUBECONFIG="$PWD/.sandbox/kubeconfig"
 ## `make doctor` cannot reach Docker or reports insufficient capacity
 
 **Symptom.** The first quickstart phase stops before creating a VM because the
-Docker daemon is unreachable, available memory is below 6.5 GiB, or free space under
-`$LIMA_HOME` is below 25 GiB for a new profile. Reusing an existing `sandbox-local`
-profile lowers the capacity gate to 2 GiB memory and 5 GiB disk.
+Docker daemon is unreachable, available memory is below 10.5 GiB, or free space under
+`$LIMA_HOME` is below 35 GiB for the default new profile. Reusing all requested
+nodes lowers the capacity gate to 2 GiB memory and 5 GiB disk; expanding the pool
+adds a capacity gate for every missing worker.
 
 **Fix.** On macOS, start Docker Desktop (`open -a Docker`) and wait until it is
 ready. On Linux, start the Docker service and verify `docker context show`. Free
@@ -64,7 +65,7 @@ kubectl -n sandbox-workloads describe pod <pod> | sed -n '/Events/,$p'
 ```
 
 `describe` shows `FailedCreatePodSandBox ... runsc` when the handler is missing on the
-node and `0/1 nodes are available: node(s) didn't match Pod's node affinity/selector`
+node and `0/N nodes are available: node(s) didn't match Pod's node affinity/selector`
 when the label is missing.
 
 **Fix.** In the local profile, rerun `make up-local`; it re-applies the label and the
@@ -72,6 +73,41 @@ gVisor installer (`scripts/install-gvisor-kubeadm.sh`) idempotently. On other
 clusters, install gVisor on the Runtime nodes, apply `k8s/platform/runtime-class.yaml`,
 and label the nodes to match `SANDBOX_RUNTIME_NODE_SELECTOR`. A RuntimeClass object
 alone is not proof that `runsc` works; `make status-local` and the E2E suite verify it.
+
+## `make scale-workers` refuses to scale down
+
+**Symptom.** The command prints `active Runtime Pods are still scheduled there`
+and leaves the worker pool unchanged.
+
+**Cause.** At least one worker selected for removal still owns a Runtime Pod.
+Stopping that node would interrupt active execution, so the resize preflights all
+targets, cordons and rechecks them as a set, then rolls back command-added cordons
+if the resize is refused.
+
+**Fix.** List the affected Pods, release or checkpoint their Runtime state, and
+retry the resize:
+
+```bash
+kubectl -n sandbox-workloads get pods -l app.kubernetes.io/name=sandbox-runtime -o wide
+make scale-workers WORKERS=N
+```
+
+Worker VM disks are retained on a successful scale-down and reused on scale-up.
+The stopped worker's Kubernetes Node registration and orphaned DaemonSet Pods are
+removed so Cilium and CSI rollouts do not wait on a machine that is intentionally off.
+
+## Worker cannot reach the kubeadm API
+
+**Symptom.** `kubeadm join` waits or reports that the control-plane address on
+port 6443 is unreachable. Both VMs may show the same default Lima guest address.
+
+**Cause.** The VMs were created on Lima's isolated default usernet rather than
+the profile-owned `user-v2` network. Separate usernet instances cannot route to
+each other even when their displayed addresses match.
+
+**Fix.** Current installers create `<control-plane>-net` and verify it before
+reusing a VM. Preserve any legacy Workspace data, then destroy and recreate the
+local profile. Do not bypass the network compatibility check.
 
 ## `ErrImageNeverPull` or `ImagePullBackOff`
 
@@ -89,8 +125,9 @@ template, which must be reachable from the node.
 **Check.**
 
 ```bash
-docker image ls | grep -E 'sandbox-(runtime|file-service|control plane|console)'
+docker image ls | grep -E 'sandbox-(runtime|file-service|control-plane|console)'
 limactl shell sandbox-local -- sudo ctr --namespace k8s.io images ls | grep sandbox-
+limactl shell sandbox-local-w1 -- sudo ctr --namespace k8s.io images ls | grep sandbox-
 kubectl -n sandbox-system describe pod <pod> | sed -n '/Events/,$p'
 ```
 
@@ -98,6 +135,34 @@ kubectl -n sandbox-system describe pod <pod> | sed -n '/Events/,$p'
 so they pick up the new image under the same tag. For a custom Runtime template,
 make sure the registry is allowed by `SANDBOX_IMAGE_REGISTRIES` and reachable from
 the node (see the network section below).
+
+## Existing Workspace volume does not use `sandbox-rwx`
+
+**Symptom.** Upgrading an older local profile stops before applying manifests because
+the existing Workspace PVC uses `local-path` instead of `sandbox-rwx`.
+
+**Cause.** The former single-node profile bound Workspace data to one VM-local
+directory. Kubernetes cannot convert that PVC to CephFS in place, and silently
+recreating it would lose data.
+
+**Fix.** Export or checkpoint any data you need first. Then run
+`make destroy-local && make quickstart` to create the scalable profile from scratch.
+The installer deliberately refuses this destructive migration.
+
+## Existing `sandbox-rwx` StorageClass has incompatible parameters
+
+**Symptom.** `make up-local` reports that `sandbox-rwx` needs the FUSE mounter,
+or Kubernetes rejects a StorageClass update because its parameters are immutable.
+
+**Cause.** An earlier local profile created `sandbox-rwx` before the CephFS
+userspace-mounter requirement was recorded. Kubernetes cannot mutate the
+parameters of an existing StorageClass.
+
+**Fix.** If no PV or PVC references the class, rerun `make up-local`; the installer
+removes and recreates only the unused StorageClass. If any volume references it,
+the installer deliberately stops. Export or checkpoint Workspace data, then follow
+the migration guidance printed by the command. Never delete the PVC or PV merely
+to make the installer continue.
 
 ## `SANDBOX_TOKEN is required; local tool fallback is disabled`
 

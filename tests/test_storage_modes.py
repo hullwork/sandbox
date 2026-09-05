@@ -59,6 +59,35 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
         text = (REPO_ROOT / "scripts/local-cluster.sh").read_text()
         self.assertIn("--set csi.installCsiOperator=true", text)
         self.assertNotIn("--set csi.installCsiOperator=false", text)
+        self.assertIn("helm pull ceph-csi-drivers", text)
+        self.assertIn("CEPH_CSI_DRIVERS_CHART_SHA256", text)
+        self.assertIn("v3.17.1@sha256:", text)
+        self.assertIn("rook/ceph-csi-drivers-values.yaml", text)
+
+        values = yaml.safe_load(
+            (REPO_ROOT / "rook/ceph-csi-drivers-values.yaml").read_text()
+        )
+        self.assertTrue(values["drivers"]["cephfs"]["enabled"])
+        self.assertEqual(
+            values["drivers"]["cephfs"]["name"],
+            "rook-ceph.cephfs.csi.ceph.com",
+        )
+        self.assertEqual(
+            values["drivers"]["cephfs"]["cephFsClientType"], "autodetect"
+        )
+        self.assertEqual(
+            values["operatorConfig"]["driverSpecDefaults"]["nodePlugin"][
+                "tolerations"
+            ][0]["key"],
+            "sandbox.hullwork.com/node-role",
+        )
+        for driver in ("rbd", "cephfs"):
+            self.assertEqual(
+                values["drivers"][driver]["nodePlugin"]["tolerations"][0][
+                    "key"
+                ],
+                "sandbox.hullwork.com/node-role",
+            )
 
     def test_local_rook_selects_its_loop_device_by_exact_path(self) -> None:
         cluster = next(
@@ -68,13 +97,62 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
             if document and document.get("kind") == "CephCluster"
         )
         storage = cluster["spec"]["storage"]
-        self.assertEqual(storage["devices"], [{"name": "/dev/loop0"}])
+        self.assertFalse(storage["useAllNodes"])
+        self.assertEqual(
+            storage["nodes"],
+            [{"name": "__SANDBOX_CONTROL_PLANE_NODE__", "devices": [{"name": "/dev/loop0"}]}],
+        )
         self.assertNotIn("deviceFilter", storage)
+
+    def test_local_workspace_storage_is_cephfs_rwx(self) -> None:
+        documents = [
+            item for item in yaml.safe_load_all(
+                (REPO_ROOT / "rook/cluster-local.yaml").read_text()
+            )
+            if item
+        ]
+        filesystem = next(item for item in documents if item["kind"] == "CephFilesystem")
+        storage_class = next(item for item in documents if item["kind"] == "StorageClass")
+        self.assertEqual(filesystem["metadata"]["name"], "sandbox-filesystem")
+        self.assertEqual(storage_class["metadata"]["name"], "sandbox-rwx")
+        self.assertEqual(
+            storage_class["provisioner"], "rook-ceph.cephfs.csi.ceph.com"
+        )
+        self.assertEqual(storage_class["parameters"]["fsName"], "sandbox-filesystem")
+        self.assertEqual(
+            storage_class["parameters"]["pool"],
+            "sandbox-filesystem-replicated",
+        )
+        self.assertEqual(storage_class["parameters"]["mounter"], "fuse")
+        self.assertEqual(
+            storage_class["parameters"][
+                "csi.storage.k8s.io/controller-publish-secret-name"
+            ],
+            "rook-csi-cephfs-provisioner",
+        )
+        local_overlay = (REPO_ROOT / "overlays/local/kustomization.yaml").read_text()
+        self.assertIn("resources:\n  - ../../k8s", local_overlay)
+        self.assertNotIn("rwo-single-node", local_overlay)
 
     def test_rook_object_store_waits_for_the_reported_phase(self) -> None:
         text = (REPO_ROOT / "scripts/local-cluster.sh").read_text()
         self.assertIn('"--for=jsonpath={.status.phase}=Ready" cephobjectstore/object-store', text)
         self.assertNotIn("--for=condition=Ready cephobjectstore", text)
+
+    def test_storage_class_upgrade_is_data_preserving(self) -> None:
+        text = (REPO_ROOT / "scripts/local-cluster.sh").read_text()
+        reconcile = text[
+            text.index("reconcile_workspace_storage_class()") :
+            text.index("deploy_ceph_rgw()")
+        ]
+        self.assertIn("get pv", reconcile)
+        self.assertIn("get pvc --all-namespaces", reconcile)
+        self.assertIn("will not replace it while PVs or PVCs exist", reconcile)
+        self.assertLess(
+            reconcile.index('if [ -n "$referenced_pvs" ]'),
+            reconcile.index("delete storageclass sandbox-rwx"),
+        )
+        self.assertIn("reconcile_workspace_storage_class", text)
 
     def test_lima_restarts_fixed_tag_project_deployments_only_on_update(self) -> None:
         text = (REPO_ROOT / "scripts/local-cluster.sh").read_text()
@@ -116,9 +194,6 @@ class LocalDevelopmentManifestTests(unittest.TestCase):
                 r"-n (\S+) (?:rollout status|wait) \\\n\s+(?:--for=\S+ )?(deployment|job)/(\S+)",
                 script,
             )
-            # local-path-provisioner is applied from its upstream manifest,
-            # not from the overlay.
-            if namespace != "local-path-storage"
         ]
         self.assertGreaterEqual(len(awaited), 6)
         self.assertEqual([entry for entry in awaited if entry not in present], [])

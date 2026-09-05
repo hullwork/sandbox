@@ -1,3 +1,6 @@
+# Legacy patch retained for operators composing the local-dev component with an
+# RWO-only profile. The scalable overlays/local profile does not reference it;
+# that profile uses the sandbox-rwx CephFS StorageClass.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

@@ -19,7 +19,7 @@ operation fails; it never falls back to running on the host.
                                 │  the tenant is decided by the credential,
                                 │  never by anything in the request body
 ════════════════════════════════▼═════════════════════════════════════════════
- namespace: sandbox-system                              trusted control plane
+ node: sandbox-local · namespace: sandbox-system        trusted control plane
  ┌─────────────────────────────────────────────────────────────────────────┐
  │  Control Plane  (control_plane/)                                        │
  │    admission · quotas · tokens · workspace and runtime lifecycle        │
@@ -33,7 +33,7 @@ operation fails; it never falls back to running on the host.
  └──────────────────────────────┬──────────────────────────────────────────┘
                                 │  in-cluster, NetworkPolicy-scoped
 ════════════════════════════════▼═════════════════════════════════════════════
- namespace: sandbox-workloads                default-deny, untrusted workload
+ nodes: sandbox-local-w1…wN · namespace: sandbox-workloads  Runtime worker pool
  ┌─────────────────────────────────────────────────────────────────────────┐
  │  Runtime Pod   RuntimeClass: gvisor                                     │
  │    runtime/       shell, PTY sessions, SSE streaming                    │
@@ -50,7 +50,7 @@ operation fails; it never falls back to running on the host.
 
 ```bash
 make bootstrap                 # create .venv and install SDK + test dependencies
-make test                      # 839 unit and contract tests, no network, no cluster
+make test                      # 844 unit and contract tests, no network, no cluster
 make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```
@@ -187,8 +187,11 @@ that order with one command.
 
 ## Run the full local cluster
 
-`make up-local` builds a single-node kubeadm Kubernetes cluster inside a Lima VM with
-Cilium and gVisor, then deploys the whole platform into it. This is the only local
+`make up-local` builds one multi-node kubeadm Kubernetes cluster in Lima. The
+`sandbox-local` node hosts trusted system services; the tainted
+`sandbox-local-w1…wN` pool hosts gVisor Runtime workloads. Cilium connects the
+nodes and enforces the workload policies; CephFS keeps Workspaces mountable from
+any active worker. The default is one worker, not a fixed maximum. This is the only local
 cluster profile the project ships.
 
 ### Prerequisites
@@ -202,17 +205,29 @@ it first rather than discovering a gap halfway through the VM build.
 | Python | 3.11 or newer |
 | Host OS | macOS or Linux |
 | Host architecture | amd64 or arm64 (`scripts/local-cluster.yaml` pins Ubuntu images for both; gVisor is installed for `x86_64` and `aarch64`) |
-| **Available memory** | **6.5 GiB free** for a new profile — the default VM reserves 6 GiB; this is a hard check, not a warning |
-| **Free disk** | **25 GiB free** under `$LIMA_HOME` (default `~/.lima`) for a new profile — the 60 GiB VM disk is sparse; this is also a hard check |
+| **Available memory** | **10.5 GiB free** for the default new profile — 6 GiB for the control plane plus 4 GiB per worker; this is a hard check, not a warning |
+| **Free disk** | **35 GiB free** under `$LIMA_HOME` for the default new profile — the 60 GiB control-plane and 30 GiB-per-worker disks are sparse |
 | Virtualization | On Linux, a readable and writable `/dev/kvm`. Without it Lima falls back to QEMU TCG software emulation, which boots kubeadm many times slower and is not usable in practice. `make doctor` warns rather than fails on this one. |
 | Network | Egress to pull the Ubuntu cloud image, Kubernetes apt packages, Cilium, gVisor, Metrics Server, and Rook/Ceph images |
 
 Set `SANDBOX_DOCTOR_SKIP_RESOURCES=1` to bypass only the memory and disk checks. The
-VM itself uses 4 CPUs, 6 GiB memory, and a 60 GiB disk by default, adjustable through
-`SANDBOX_LOCAL_CPUS`, `SANDBOX_LOCAL_MEMORY_GIB`, and `SANDBOX_LOCAL_DISK_GIB`.
-When `sandbox-local` already exists, doctor switches to a 2 GiB memory / 5 GiB disk
-reuse gate because it is not allocating a second VM; explicit
-`SANDBOX_DOCTOR_MIN_*` overrides still win.
+control-plane VM uses 4 CPUs, 6 GiB memory, and a 60 GiB disk by default,
+adjustable through `SANDBOX_LOCAL_CPUS`, `SANDBOX_LOCAL_MEMORY_GIB`, and
+`SANDBOX_LOCAL_DISK_GIB`. The Runtime worker uses 4 CPUs, 4 GiB memory, and a
+30 GiB disk. `SANDBOX_LOCAL_WORKER_COUNT` selects the initial pool size;
+`SANDBOX_LOCAL_WORKER_CPUS`, `SANDBOX_LOCAL_WORKER_MEMORY_GIB`, and
+`SANDBOX_LOCAL_WORKER_DISK_GIB` size each worker. When all requested VMs already
+exist, doctor switches to a 2 GiB memory / 5 GiB disk reuse gate; expanding the
+pool adds capacity checks per missing worker. Explicit `SANDBOX_DOCTOR_MIN_*`
+overrides still win. When VM memory or disk sizes are customized, the resource
+gate derives its reservation from those configured sizes rather than retaining
+the default-profile threshold.
+
+Every profile owns a Lima `user-v2` network named `<control-plane>-net`; this is
+what gives each VM a distinct, mutually reachable address. Override it with
+`SANDBOX_LOCAL_NETWORK`; override its automatically selected unused `/24` with
+`SANDBOX_LOCAL_NETWORK_GATEWAY`. An older VM created on Lima's isolated default usernet
+is rejected rather than silently reused as a broken multi-node cluster.
 
 ### Bring it up
 
@@ -223,7 +238,7 @@ make up-local
 ```
 
 The first `make up-local` downloads and builds everything listed above, so its
-duration is dominated by your network throughput; subsequent runs reuse the VM disk.
+duration is dominated by your network throughput; subsequent runs reuse the existing VM disks.
 It ends by printing:
 
 ```text
@@ -235,6 +250,20 @@ The kubeconfig is written to `.sandbox/kubeconfig` inside the checkout, not to
 `~/.kube/config`, so the local cluster cannot collide with a context you already use.
 The Makefile exports `KUBECONFIG` for its own targets, so `make dev-token`,
 `make status-local`, and the port-forward targets need no manual export.
+
+Resize the Runtime pool without rebuilding the control plane:
+
+```bash
+make scale-workers WORKERS=3  # add/start w2 and w3, install gVisor, load Runtime image
+make scale-workers WORKERS=1  # drain and stop w2 and w3; disks are retained
+make scale-workers WORKERS=0  # allowed only when no Runtime Pods remain
+```
+
+Scale-down fails closed if a target node still has an active Runtime Pod. Release
+or checkpoint that Runtime first, then retry. Scaling back up reuses stopped worker
+disks; the stale Kubernetes Node registration is removed while stopped and kubeadm
+registers it again on scale-up. At zero workers, Runtime admission
+is paused and fails fast; the trusted storage and Console services remain available.
 
 ### First command
 
@@ -256,11 +285,11 @@ Workspace `demo`.
 ### Tear it down
 
 ```bash
-make down-local     # stop the Lima VM; its 60 GiB disk and .sandbox/ remain
-make destroy-local  # delete the VM with its disk and the generated .sandbox/ state
+make down-local     # stop the control plane and every worker; VM disks and .sandbox/ remain
+make destroy-local  # delete the control plane, every worker, and generated state
 ```
 
-`down-local` is the right choice between sessions — `up-local` reuses the stopped VM.
+`down-local` is the right choice between sessions — `up-local` reuses both stopped VMs.
 `destroy-local` is irreversible: Workspace files, checkpoints, and the SQLite state
 inside the VM are gone. It also removes the four fixed-tag project images from the
 local Docker daemon; shared base layers remain available to Docker's cache.
@@ -325,8 +354,8 @@ rather than a deployable overlay; CI checks the others on every push.
 
 | Profile | Intended for | Maturity |
 | --- | --- | --- |
-| `overlays/local` | The `make up-local` VM. SQLite state, local-path PVCs, single pinned volume agent. | Reference. Exercises isolation and recovery behavior; its single-node storage and SQLite database are **not** a production durability claim. |
-| `overlays/rwo-single-node` | Clusters without RWX storage. Trades volume-agent availability for portability: one RWO claim, one pinned replica. | Reference. |
+| `overlays/local` | The `1+N` `make up-local` cluster. SQLite state, CephFS RWX Workspaces, and a scalable Runtime pool. | Reference. Exercises placement, isolation, scaling, and recovery behavior; its single-OSD Ceph and SQLite database are **not** production durability claims. |
+| `overlays/rwo-single-node` | Clusters where all Workspace consumers share one RWO-capable Runtime node. Trades volume-agent availability for portability: one RWO claim, one pinned replica. | Reference. |
 | `overlays/eks` | Amazon EKS. Swaps in an EFS-backed StorageClass, which the operator must install first. | Adapter example — see [Known limitations](#known-limitations) before using it. |
 | `overlays/external-deps` | Control-plane state and object storage outside the cluster (managed database, S3-compatible store). | Example with placeholders. Nothing references it by default; copy it and fill in your own Secrets. |
 | `charts/sandbox` | Helm-based installs. `make chart-lint` and `make chart-render` validate it without a cluster. | Independently deployable package. |
@@ -373,7 +402,7 @@ the image references before treating this overlay as deployable.
 **The `sandbox-system` namespace has no NetworkPolicy.** All four shipped
 NetworkPolicies target `sandbox-workloads`. The Control Plane and Console are also
 exposed as NodePort services (30080 and 30081) in the base manifests. Both are
-acceptable for a single-node local VM and are not acceptable on a shared cluster
+acceptable for the dedicated local cluster and are not acceptable on a shared cluster
 without an ingress and namespace policies in front of them.
 
 **The workspace admission gate is a process-local lock.**

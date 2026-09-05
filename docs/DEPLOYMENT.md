@@ -34,10 +34,11 @@ Lima provides the Linux VM in the standalone integration environment; kubeadm
 provides Kubernetes inside those VMs. Sandbox Platform itself talks to Kubernetes and
 does not depend on the Lima API.
 
-The standalone integration entrypoint creates one dedicated Lima VM, bootstraps a
-kubeadm cluster, installs checksum-pinned Cilium and gVisor, loads locally built
-images plus the pinned Metrics Server image into containerd, and applies a
-self-contained development profile:
+The standalone integration entrypoint creates one control-plane VM plus a
+configurable pool of Runtime-worker VMs in one kubeadm cluster. The control-plane
+node hosts trusted system services; tainted workers host Runtime workloads. It
+installs checksum-pinned Cilium cluster-wide and gVisor only on workers, loads each image only onto nodes that
+need it, and applies a self-contained development profile:
 
 ```bash
 make quickstart
@@ -52,12 +53,15 @@ proof. It records phase timing and outcome in
 `.sandbox/quickstart-summary.json`. Use `make up-local` directly when the Python
 environment is already prepared and only the deployment needs updating.
 
-For a new profile, `make doctor` fails when less than 6.5 GiB of memory or 25 GiB
-of disk is free. When the dedicated `sandbox-local` VM already exists, it uses a
-2 GiB memory / 5 GiB disk reuse gate instead. It
+For the default one-worker profile, `make doctor` fails when less than 10.5 GiB
+of memory or 35 GiB of disk is free. Each additional missing worker adds its
+configured capacity to the gate. When all requested nodes already exist, it uses
+a 2 GiB memory / 5 GiB disk reuse gate instead. It
 warns when `/dev/kvm` is absent on Linux (Lima then falls back to QEMU software
 emulation, which is far slower). Set `SANDBOX_DOCTOR_SKIP_RESOURCES=1` to skip the
-resource gate.
+resource gate. Overrides to the control-plane or worker VM memory/disk sizes also
+change the calculated new-profile and expansion thresholds; the defaults remain
+10.5 GiB memory and 35 GiB disk.
 
 The cluster-admin kubeconfig is written to `.sandbox/kubeconfig`, never to
 `~/.kube/config`. Make targets that talk to the cluster (`dev-token`,
@@ -69,12 +73,36 @@ export KUBECONFIG="$(scripts/local-cluster.sh kubeconfig)"
 kubectl get nodes
 ```
 
-Required host tools are Docker, Lima, kubectl, Helm, and OpenSSL. The default VM is
-`sandbox-local`; `down-local` stops it without deleting its disk. Override the
-name or state directory with `SANDBOX_LOCAL_VM` and `SANDBOX_STATE_DIR`.
+Required host tools are Docker, Lima, kubectl, Helm, and OpenSSL. The default nodes
+are `sandbox-local` and workers `sandbox-local-w1…wN`; `down-local` stops all
+without deleting disks. Override the control-plane name with `SANDBOX_LOCAL_VM`,
+the worker prefix/count with `SANDBOX_LOCAL_WORKER_PREFIX` and
+`SANDBOX_LOCAL_WORKER_COUNT`, the profile-owned Lima user-v2 network with
+`SANDBOX_LOCAL_NETWORK`, its automatically selected `/24` with
+`SANDBOX_LOCAL_NETWORK_GATEWAY`, and state with `SANDBOX_STATE_DIR`. Each VM receives a
+distinct address on that shared network; an existing VM on Lima's isolated
+default usernet is rejected because it cannot form a multi-node cluster.
 
-Remove everything the profile created on the host, that is the Lima VM and its
-disk, the `.sandbox` state directory including the kubeconfig, and the four locally
+Resize the active Runtime pool without rebuilding the control plane:
+
+```bash
+make scale-workers WORKERS=3
+make scale-workers WORKERS=1
+make scale-workers WORKERS=0
+```
+
+The command makes a new worker schedulable only after it is Ready, gVisor is
+installed, and the Runtime image is loaded. Before scale-down it checks every
+target node, cordons the complete target set, and checks again to close the
+scheduler race. If either check finds a Runtime Pod, no worker is stopped and any
+cordon added by the command is rolled back. At zero
+workers the Control Plane sets Runtime admission capacity to zero, while Console
+and durable Workspace services remain available. A successful scale-down preserves
+the Lima disk but removes the stopped machine's Kubernetes Node registration and
+orphaned DaemonSet Pods; kubeadm registers the retained worker again on scale-up.
+
+Remove everything the profile created on the host, that is the control-plane VM and every worker VM with their
+disks, the `.sandbox` state directory including the kubeconfig, and the four locally
 built images, with:
 
 ```bash
@@ -91,7 +119,10 @@ SANDBOX_STATE_DIR="$PWD/.sandbox-test" \
 SANDBOX_LOCAL_API_PORT=28448 \
 SANDBOX_LOCAL_CONTROL_PLANE_PORT=28080 \
 SANDBOX_LOCAL_CPUS=2 \
-SANDBOX_LOCAL_MEMORY_GIB=4 \
+SANDBOX_LOCAL_MEMORY_GIB=6 \
+SANDBOX_LOCAL_WORKER_COUNT=2 \
+SANDBOX_LOCAL_WORKER_CPUS=4 \
+SANDBOX_LOCAL_WORKER_MEMORY_GIB=4 \
 make up-local
 ```
 
@@ -99,14 +130,22 @@ Port overrides belong to the VM at creation time. When reusing an existing VM,
 the script rejects mismatched values instead of silently writing a broken
 kubeconfig.
 
-This profile proves the Lima/kubeadm/gVisor path, but uses single-node local-path
-storage, SQLite, and an in-cluster Ceph RGW development profile backed by local disk.
+This profile proves the Lima/kubeadm/gVisor path, dedicated Runtime-node placement,
+and worker scaling. CephFS provides RWX Workspaces to every worker, but SQLite and
+the single-OSD Ceph development profile remain backed by the control-plane node's local disk.
 Data survives Pod restarts but not deletion of the VM disk. It is not a
 production durability or HA claim.
 
-`scripts/local-cluster.sh` installs the Rook chart, applies
-`rook/cluster-local.yaml`, waits for `CephCluster` and `CephObjectStore` readiness,
-copies the generated `sandbox-runtime` user into `object-store-credentials`, and then
+`scripts/local-cluster.sh` installs the checksum-pinned Rook operator chart and the
+separate checksum-pinned `ceph-csi-drivers` chart, then applies
+`rook/cluster-local.yaml` and waits for the CSI controllers/node plugins,
+`CephCluster`, `CephFilesystem`, and `CephObjectStore` readiness. The local stack
+pins Ceph 20.2.4 and Ceph-CSI 3.17.1 by digest. Its `sandbox-rwx` StorageClass uses
+the userspace FUSE mounter so Ubuntu Noble's 6.8 kernel does not need to consume
+the newer AES256K CephX key format directly. The installer recreates an obsolete
+StorageClass only when no PV or PVC references it; otherwise it fails with an
+explicit migration message rather than touching Workspace data. It then copies
+the generated `sandbox-runtime` user into `object-store-credentials`, and then
 runs the versioned bucket-initialization Job. The endpoint is
 `http://rook-ceph-rgw-object-store.rook-ceph.svc.cluster.local:80`; the buckets are
 `user-uploads`, `agent-data`, and `sandbox-workspaces`.
@@ -120,7 +159,7 @@ images pinned to the exact signed GHCR digests. Supply the
 
 | Environment | Kube context convention | Configuration source | Storage/database |
 | --- | --- | --- | --- |
-| Local | `sandbox-local` | `overlays/local`, generated local Secrets | SQLite, in-cluster Ceph RGW, local-path RWO Workspace storage |
+| Local | `sandbox-local` | `overlays/local`, generated local Secrets | SQLite, in-cluster Ceph RGW, CephFS RWX Workspace storage |
 | Development | `sandbox-dev` | Base plus operator GitOps values | PostgreSQL, external object store, RWX CSI |
 | Staging | `sandbox-staging` | Base plus operator GitOps values | Production-equivalent managed dependencies |
 | Production | `sandbox-prod` | Base plus reviewed provider adapter | Durable managed dependencies and backup |
