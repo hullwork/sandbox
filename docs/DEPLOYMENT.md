@@ -14,9 +14,14 @@ helm template sandbox charts/sandbox
 
 `values.schema.json` validates the public configuration surface. Every product
 image accepts an immutable `sha256:` digest; when set, the digest takes
-precedence over its tag. What the chart needs from the cluster - a PostgreSQL or
-MySQL database, S3-compatible object storage, an RWX StorageClass, and a gVisor
-RuntimeClass - is configured through `values.yaml` and described in the
+precedence over its tag. Three of the four things the chart needs from the
+cluster are `values.yaml` settings: the database (`postgresql.*`, embedded by
+default), S3-compatible object storage (`objectStore.*`), and an RWX
+StorageClass (`workspace.storageClass`). The fourth is not. The chart creates
+the `gvisor` RuntimeClass itself and pins `SANDBOX_RUNTIME_CLASS` to it with no
+value to override, so installing the `runsc` handler on every node that will
+host Runtimes is a prerequisite, not a configuration choice: without it the Pods
+schedule and then loop in `RunContainerError`. All four are described in the
 [Production guide](PRODUCTION.md).
 
 The existing Kustomize bases remain supported for source deployments. The Helm
@@ -184,6 +189,16 @@ The base manifests reference these objects by name and never create them. The
 local profile generates the Secrets with random values
 (`scripts/bootstrap-local-secrets.sh`); every other environment must create them
 before `kubectl apply`.
+
+Both namespaces ship with `pod-security.kubernetes.io/enforce: restricted`, so
+anything you add alongside them - the PostgreSQL you bring, a debug Pod, an
+object-store shim - has to satisfy that profile too: `runAsNonRoot: true`,
+`allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, and
+`seccompProfile.type: RuntimeDefault`. Stock database images do not set these,
+and the rejection arrives from the ReplicaSet controller as a `FailedCreate`
+event rather than from `kubectl apply`, so the Deployment looks accepted while
+no Pod is ever created. Put such a dependency in its own namespace, or add the
+security context.
 
 | Resource | Kind | Namespace | Keys or requirement |
 | --- | --- | --- | --- |

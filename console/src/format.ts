@@ -33,6 +33,38 @@ export function formatUnix(
   }).format(new Date(seconds * 1000));
 }
 
+const CATALOGS = { en, "zh-CN": zhCN } as const;
+
+/**
+ * Renders one pluralised amount, for example "1 minute" or "12 minutes".
+ *
+ * The catalogs carry the unit as its own `.one`/`.other` family rather than
+ * baking it into a whole sentence: the compound form needs hours and minutes
+ * pluralised independently, and "in 5 hours 1 minutes" is exactly what a single
+ * sentence template cannot avoid. Locales without plural categories declare the
+ * same text twice, which is what Intl.PluralRules then never has to choose
+ * between.
+ */
+function amount(
+  locale: Locale,
+  unit: "seconds" | "minutes" | "hours",
+  count: number,
+): string {
+  const catalog = CATALOGS[locale];
+  const category = new Intl.PluralRules(locale).select(count);
+  const message =
+    catalog[`relative.${unit}.${category}` as keyof typeof catalog]
+    ?? catalog[`relative.${unit}.other` as keyof typeof catalog];
+  return String(message).replace("{count}", String(count));
+}
+
+/** Places one rendered amount in its past or future frame. */
+function directed(locale: Locale, value: string, past: boolean): string {
+  const catalog = CATALOGS[locale];
+  return catalog[past ? "relative.past" : "relative.future"]
+    .replace("{value}", value);
+}
+
 function relativeMessage(
   locale: Locale,
   unit: "seconds" | "minutes" | "hours" | "compoundHours",
@@ -40,33 +72,13 @@ function relativeMessage(
   past: boolean,
   minutes = 0,
 ): string {
-  const messages = {
-    en: {
-      secondsPast: en["relative.secondsPast"],
-      secondsFuture: en["relative.secondsFuture"],
-      minutesPast: en["relative.minutesPast"],
-      minutesFuture: en["relative.minutesFuture"],
-      hoursPast: en["relative.hoursPast"],
-      hoursFuture: en["relative.hoursFuture"],
-      compoundHoursPast: en["relative.compoundHoursPast"],
-      compoundHoursFuture: en["relative.compoundHoursFuture"],
-    },
-    "zh-CN": {
-      secondsPast: zhCN["relative.secondsPast"],
-      secondsFuture: zhCN["relative.secondsFuture"],
-      minutesPast: zhCN["relative.minutesPast"],
-      minutesFuture: zhCN["relative.minutesFuture"],
-      hoursPast: zhCN["relative.hoursPast"],
-      hoursFuture: zhCN["relative.hoursFuture"],
-      compoundHoursPast: zhCN["relative.compoundHoursPast"],
-      compoundHoursFuture: zhCN["relative.compoundHoursFuture"],
-    },
-  }[locale];
-  const template = messages[`${unit}${past ? "Past" : "Future"}`];
-  return template
-    .replace("{count}", String(count))
-    .replace("{hours}", String(count))
-    .replace("{minutes}", String(minutes));
+  if (unit === "compoundHours") {
+    const value = CATALOGS[locale]["relative.compound"]
+      .replace("{hours}", amount(locale, "hours", count))
+      .replace("{minutes}", amount(locale, "minutes", minutes));
+    return directed(locale, value, past);
+  }
+  return directed(locale, amount(locale, unit, count), past);
 }
 
 /**

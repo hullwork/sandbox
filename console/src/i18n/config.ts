@@ -20,6 +20,9 @@ export const PLURAL_KEYS = [
   "tenants.keyCount",
   "monitoring.nodes.count",
   "monitoring.runtimes.count",
+  "relative.seconds",
+  "relative.minutes",
+  "relative.hours",
 ] as const;
 
 export type PluralTranslationKey = (typeof PLURAL_KEYS)[number];

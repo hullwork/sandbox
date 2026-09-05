@@ -184,6 +184,46 @@ class MutationExperimentToolTests(unittest.TestCase):
         )
 
 
+def doctor_required_commands() -> list[str]:
+    """Every command name `required=`/`required+=` in the doctor, script-order.
+
+    Parsed rather than duplicated: the two Linux-only entries were in the script
+    and in this file's fixtures for a while, and still missing from the README
+    table a newcomer reads before running anything. A name that expands at run
+    time (`qemu-system-$(uname -m)`) is reduced to its literal prefix, which is
+    what prose can name.
+    """
+    script = (ROOT / "scripts/dev-doctor.sh").read_text(encoding="utf-8")
+    names: list[str] = []
+    for line in script.splitlines():
+        # Drop command substitutions first: `$(uname -m)` contains a space and
+        # a paren, so splitting the raw line yields the fragment `-m)`.
+        line = re.sub(r"\$\([^)]*\)", "", line)
+        match = re.search(r"required\+?=\((.*)\)", line)
+        if not match:
+            continue
+        for word in match.group(1).split():
+            word = word.strip("\"'")
+            if word:
+                names.append(word)
+    return names
+
+
+class PrerequisiteDocumentationTests(unittest.TestCase):
+    def test_the_readme_names_every_command_the_doctor_demands(self) -> None:
+        # `make doctor` is the first command the README tells a newcomer to run
+        # and it exits non-zero on a missing tool. A tool it demands but the
+        # prerequisites table omits turns that into a failure the reader was
+        # given no way to prevent.
+        required = doctor_required_commands()
+        self.assertIn("qemu-system-", required, "doctor parse produced no qemu entry")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        start = readme.index("### Prerequisites")
+        section = readme[start:readme.index("### Bring it up", start)]
+        missing = [name for name in required if name not in section]
+        self.assertEqual(missing, [], f"README prerequisites omit: {missing}")
+
+
 class DevelopmentScriptTests(unittest.TestCase):
     def test_shell_entrypoints_parse(self) -> None:
         for relative in (

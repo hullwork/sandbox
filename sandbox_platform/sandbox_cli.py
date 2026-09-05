@@ -37,28 +37,41 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     create = subparsers.add_parser("create", help="create or resume a sandbox")
-    create.add_argument("name", nargs="?")
-    create.add_argument("--template")
-    create.add_argument("--json", action="store_true")
+    create.add_argument(
+        "name",
+        nargs="?",
+        help="Workspace name; omit for a throwaway one. Only `run` spells this "
+        "as --name, because its own positional is the command to execute",
+    )
+    create.add_argument("--template", help="runtime template id (see `sandboxctl templates`)")
+    create.add_argument("--json", action="store_true", help="output raw JSON")
 
     run = subparsers.add_parser("run", help="create/resume and run a command")
-    run.add_argument("--name")
-    run.add_argument("--template")
-    run.add_argument("--timeout", type=int, default=30)
-    run.add_argument("--stop", action="store_true")
-    run.add_argument("command", nargs=argparse.REMAINDER)
+    run.add_argument(
+        "--name",
+        help="Workspace name; omit for a throwaway one. A flag here, and a "
+        "positional in create/exec/stop, because the positional is the command",
+    )
+    run.add_argument("--template", help="runtime template id (see `sandboxctl templates`)")
+    run.add_argument("--timeout", type=int, default=30, help="seconds to wait for the command")
+    run.add_argument(
+        "--stop",
+        action="store_true",
+        help="release the Runtime afterwards; the Workspace and its files stay",
+    )
+    run.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
 
     execute = subparsers.add_parser("exec", help="run in an existing sandbox")
-    execute.add_argument("name")
-    execute.add_argument("--timeout", type=int, default=30)
-    execute.add_argument("command", nargs=argparse.REMAINDER)
+    execute.add_argument("name", help="Workspace name, positional (not --name)")
+    execute.add_argument("--timeout", type=int, default=30, help="seconds to wait for the command")
+    execute.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
 
     stop = subparsers.add_parser("stop", help="stop a sandbox Runtime")
-    stop.add_argument("name")
-    stop.add_argument("--json", action="store_true")
+    stop.add_argument("name", help="Workspace name, positional (not --name)")
+    stop.add_argument("--json", action="store_true", help="output raw JSON")
 
     listing = subparsers.add_parser("list", help="list active Runtimes")
-    listing.add_argument("--json", action="store_true")
+    listing.add_argument("--json", action="store_true", help="output raw JSON")
     return parser
 
 

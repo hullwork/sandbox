@@ -1443,11 +1443,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_store_outage(exc)
             return None
 
-    def require_workspace_tenant(self, workspace_id: str) -> bool:
+    def require_workspace_tenant(
+        self, workspace_id: str, *, audit_denial: bool = True
+    ) -> bool:
         """Before operating a Workspace by ID, confirm that it belongs to this tenant.
 
         List filtering only blocks "seeing", but this block blocks "guessing the ID and then acting directly".
-        workspace_id is HMAC-derived and non-enumerable, but non-enumerability is not an access control."""
+        workspace_id is HMAC-derived and non-enumerable, but non-enumerability is not an access control.
+
+        audit_denial=False is for the one caller that does not receive an ID at
+        all: /v1/workspaces/resolve derives the ID from this tenant's own
+        credential, so a miss there means "this session has no Workspace yet",
+        never "someone is probing another tenant". Auditing it would file one
+        denial per Workspace ever created, in a row an operator cannot tell
+        apart from a real cross-tenant attempt - which is the only thing this
+        audit exists to surface. The ownership check itself still runs."""
         if control_plane.STORE is None or self.tenant_id is None:
             return True
         matches = self._workspace_owner_matches(workspace_id)
@@ -1459,7 +1469,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         #That's a signal that can be used to enumerate.
         #But the rejection itself leaves a mark - continuous rejection means someone is testing the ID, which is a precursor to an attack.
         #Instead of noise, there is precisely nothing to say in the response.
-        self.audit("workspace.access", target=workspace_id, outcome="denied")
+        if audit_denial:
+            self.audit("workspace.access", target=workspace_id, outcome="denied")
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "workspace not found"})
         return False
 
@@ -2808,7 +2819,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     principal_kind=principal_kind,
                     principal_id=principal_id,
                 )
-                if not self.require_workspace_tenant(workspace_id):
+                if not self.require_workspace_tenant(
+                    workspace_id, audit_denial=False
+                ):
                     return
                 status, listing, content_type = control_plane.volume_agent_request(
                     "GET", "/v1/workspaces"

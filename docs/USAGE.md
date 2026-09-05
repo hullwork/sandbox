@@ -34,8 +34,13 @@ operations used in [Common tasks](#common-tasks).
 sandbox create demo
 sandbox exec demo -- python -c 'print("sandbox-ready")'
 sandbox run --name demo --stop -- sh -lc 'printf "done\\n"'
+sandbox stop demo
 sandbox list
 ```
+
+`run` is the only subcommand that spells the Workspace name as `--name`; its
+positional is already the command to execute. `create`, `exec`, and `stop` take
+the name positionally, so `sandbox stop --name demo` is rejected.
 
 `sandbox create` prints the name, Runtime id, and Workspace id separated by tabs
 (`demo<TAB>sb-...<TAB>ws-...`). `sandbox list` prints one active Runtime per line as

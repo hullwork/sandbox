@@ -21,8 +21,24 @@ class KubeError(RuntimeError):
 
 
 class KubeClient:
+    # SystemExit instead of KeyError/FileNotFoundError, for the same reason
+    # core.py states for the configuration block: what an operator wants out of
+    # a container that will not start is an instruction to follow, not a stack
+    # trace. All three inputs are absent together in the two situations that
+    # actually happen - the process was started outside a cluster, and the
+    # Deployment was given automountServiceAccountToken: false - and neither
+    # is diagnosable from `KeyError: 'KUBERNETES_SERVICE_HOST'`.
     def __init__(self) -> None:
-        host = os.environ["KUBERNETES_SERVICE_HOST"]
+        host = os.getenv("KUBERNETES_SERVICE_HOST")
+        if not host:
+            raise SystemExit(
+                "control_plane: KUBERNETES_SERVICE_HOST is unset, so this "
+                "process is not running inside a Kubernetes Pod. The Control "
+                "Plane talks to the API server through its in-cluster service "
+                "account and has no kubeconfig path; deploy it to the cluster "
+                "(k8s/, overlays/, or charts/sandbox) rather than running it "
+                "on a workstation."
+            )
         port = os.getenv("KUBERNETES_SERVICE_PORT_HTTPS", "443")
         self.base_url = f"https://{host}:{port}"
         token_path = os.getenv(
@@ -33,9 +49,18 @@ class KubeClient:
             "KUBERNETES_CA_FILE",
             "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
         )
-        with open(token_path, encoding="utf-8") as handle:
-            self.token = handle.read().strip()
-        self.ssl_context = ssl.create_default_context(cafile=ca_path)
+        try:
+            with open(token_path, encoding="utf-8") as handle:
+                self.token = handle.read().strip()
+            self.ssl_context = ssl.create_default_context(cafile=ca_path)
+        except OSError as exc:
+            raise SystemExit(
+                f"control_plane: cannot read the service-account credential "
+                f"{exc.filename or token_path}: {exc.strerror}. The Pod needs "
+                "automountServiceAccountToken left on (the volume role is the "
+                "only one that turns it off), or KUBERNETES_TOKEN_FILE and "
+                "KUBERNETES_CA_FILE pointed at readable copies."
+            ) from exc
 
     def request(
         self,
