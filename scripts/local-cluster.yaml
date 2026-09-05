@@ -39,8 +39,11 @@ provision:
       EOF
       sysctl --system
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update -qq
-      apt-get install -y -qq containerd apt-transport-https ca-certificates curl gpg
+      # A newly-created Lima user-v2 NIC can become usable a few seconds before
+      # its DNS proxy is ready. Retry transient fetch failures so a successful
+      # VM boot cannot leave kubeadm half-installed.
+      apt-get -o Acquire::Retries=5 update -qq
+      apt-get -o Acquire::Retries=5 install -y -qq containerd apt-transport-https ca-certificates curl gpg
       mkdir -p /etc/containerd /etc/apt/keyrings
       containerd config default >/etc/containerd/config.toml
       sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
@@ -49,10 +52,10 @@ provision:
       # its first boot rather than caching containerd's built-in cgroupfs default.
       systemctl enable containerd
       systemctl restart containerd
-      curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
+      curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
         | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
       echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /' \
         >/etc/apt/sources.list.d/kubernetes.list
-      apt-get update -qq
-      apt-get install -y -qq kubelet=1.36.* kubeadm=1.36.* kubectl=1.36.*
+      apt-get -o Acquire::Retries=5 update -qq
+      apt-get -o Acquire::Retries=5 install -y -qq kubelet=1.36.* kubeadm=1.36.* kubectl=1.36.*
       apt-mark hold kubelet kubeadm kubectl

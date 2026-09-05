@@ -35,9 +35,11 @@ PY
 
 if ! docker info >/dev/null 2>&1; then
   printf 'Docker is installed but its daemon is not reachable.\n' >&2
-  if [ "$(uname -s)" = Darwin; then
+  if [ "$(uname -s)" = Darwin ]; then
     printf 'Start Docker Desktop (for example: open -a Docker), wait for it to report Ready, then rerun make doctor.\n' >&2
   else
+    # Backticks are documentation in this single-quoted message.
+    # shellcheck disable=SC2016
     printf 'Start the Docker service and verify `docker context show` points at the intended daemon, then rerun make doctor.\n' >&2
   fi
   exit 1
@@ -56,27 +58,69 @@ if [ "$(uname -s)" = Linux ]; then
   fi
 fi
 
-# A new default VM reserves 6 GiB of memory and a 60 GiB disk (sparse)
-# (scripts/local-cluster.sh). The reference clean install consumes under 15 GiB
-# of physical host storage; 6.5/25 keeps a real safety margin without rejecting a
-# host that can run the profile merely because the sparse virtual size is 60 GiB.
-# Reusing an existing VM only needs enough headroom to build images and roll
-# Pods; applying the new-VM threshold after a successful install made retries
-# fail precisely because the VM was already consuming those resources.
+# A new default profile reserves 6 GiB for the control-plane VM and 4 GiB for
+# the Runtime worker. Their 60/30 GiB disks are sparse. Reusing both nodes only
+# needs enough headroom to build images and roll Pods; adding the worker to a
+# legacy single-node profile uses the smaller expansion gate.
 # Set SANDBOX_DOCTOR_SKIP_RESOURCES=1 to bypass either mode.
 if [ "${SANDBOX_DOCTOR_SKIP_RESOURCES:-0}" = 1 ]; then
   printf 'resources  check skipped (SANDBOX_DOCTOR_SKIP_RESOURCES=1)\n'
 else
   LIMA_DISK_DIR="${LIMA_HOME:-$HOME/.lima}"
   [ -d "$LIMA_DISK_DIR" ] || LIMA_DISK_DIR="$HOME"
-  DEFAULT_MIN_MEMORY_GIB=6.5
-  DEFAULT_MIN_DISK_GIB=25
-  RESOURCE_MODE=new-profile
-  if limactl list --format '{{.Name}}' 2>/dev/null \
-    | grep -Fx "${SANDBOX_LOCAL_VM:-sandbox-local}" >/dev/null; then
+  CONTROL_PLANE_VM="${SANDBOX_LOCAL_VM:-sandbox-local}"
+  RUNTIME_VM_PREFIX="${SANDBOX_LOCAL_WORKER_PREFIX:-${CONTROL_PLANE_VM}-w}"
+  RUNTIME_WORKER_COUNT="${SANDBOX_LOCAL_WORKER_COUNT:-1}"
+  CONTROL_PLANE_MEMORY_GIB="${SANDBOX_LOCAL_MEMORY_GIB:-6}"
+  CONTROL_PLANE_DISK_GIB="${SANDBOX_LOCAL_DISK_GIB:-60}"
+  RUNTIME_MEMORY_GIB="${SANDBOX_LOCAL_WORKER_MEMORY_GIB:-4}"
+  RUNTIME_DISK_GIB="${SANDBOX_LOCAL_WORKER_DISK_GIB:-30}"
+  [[ "$RUNTIME_WORKER_COUNT" =~ ^[1-9][0-9]*$ ]] || {
+    printf 'SANDBOX_LOCAL_WORKER_COUNT must be a positive integer, got %s\n' \
+      "$RUNTIME_WORKER_COUNT" >&2
+    exit 1
+  }
+  for RESOURCE_VALUE in "$CONTROL_PLANE_MEMORY_GIB" "$CONTROL_PLANE_DISK_GIB" \
+    "$RUNTIME_MEMORY_GIB" "$RUNTIME_DISK_GIB"; do
+    [[ "$RESOURCE_VALUE" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+      printf 'VM memory and disk values must be positive numbers, got %s\n' \
+        "$RESOURCE_VALUE" >&2
+      exit 1
+    }
+  done
+  RESOURCE_RESERVES="$(python3 - "$CONTROL_PLANE_MEMORY_GIB" \
+    "$CONTROL_PLANE_DISK_GIB" "$RUNTIME_MEMORY_GIB" "$RUNTIME_DISK_GIB" <<'PY'
+import sys
+
+control_memory, control_disk, worker_memory, worker_disk = map(float, sys.argv[1:])
+if min(control_memory, control_disk, worker_memory, worker_disk) <= 0:
+    raise SystemExit("VM memory and disk values must be greater than zero")
+print(control_memory, min(control_disk, 25), worker_memory, min(worker_disk, 10))
+PY
+)"
+  read -r CONTROL_MEMORY_RESERVE CONTROL_DISK_RESERVE \
+    WORKER_MEMORY_RESERVE WORKER_DISK_RESERVE <<<"$RESOURCE_RESERVES"
+  VM_NAMES="$(limactl list --format '{{.Name}}' 2>/dev/null || true)"
+  CONTROL_PLANE_EXISTS=0
+  grep -Fx "$CONTROL_PLANE_VM" <<<"$VM_NAMES" >/dev/null && CONTROL_PLANE_EXISTS=1
+  EXISTING_WORKERS=0
+  for WORKER_INDEX in $(seq 1 "$RUNTIME_WORKER_COUNT"); do
+    grep -Fx "${RUNTIME_VM_PREFIX}${WORKER_INDEX}" <<<"$VM_NAMES" >/dev/null \
+      && EXISTING_WORKERS=$((EXISTING_WORKERS + 1))
+  done
+  MISSING_WORKERS=$((RUNTIME_WORKER_COUNT - EXISTING_WORKERS))
+  if ((CONTROL_PLANE_EXISTS && MISSING_WORKERS == 0)); then
     DEFAULT_MIN_MEMORY_GIB=2
     DEFAULT_MIN_DISK_GIB=5
     RESOURCE_MODE=reuse-profile
+  elif ((CONTROL_PLANE_EXISTS)); then
+    DEFAULT_MIN_MEMORY_GIB="$(python3 -c "print(2 + $WORKER_MEMORY_RESERVE * $MISSING_WORKERS + 0.5)")"
+    DEFAULT_MIN_DISK_GIB="$(python3 -c "print(5 + $WORKER_DISK_RESERVE * $MISSING_WORKERS)")"
+    RESOURCE_MODE=expand-worker-pool
+  else
+    DEFAULT_MIN_MEMORY_GIB="$(python3 -c "print($CONTROL_MEMORY_RESERVE + $WORKER_MEMORY_RESERVE * $MISSING_WORKERS + 0.5)")"
+    DEFAULT_MIN_DISK_GIB="$(python3 -c "print($CONTROL_DISK_RESERVE + $WORKER_DISK_RESERVE * $MISSING_WORKERS)")"
+    RESOURCE_MODE=new-profile
   fi
   SANDBOX_DOCTOR_DEFAULT_MIN_MEMORY_GIB="$DEFAULT_MIN_MEMORY_GIB" \
   SANDBOX_DOCTOR_DEFAULT_MIN_DISK_GIB="$DEFAULT_MIN_DISK_GIB" \

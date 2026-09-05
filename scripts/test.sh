@@ -197,6 +197,12 @@ runtime_class="$(
     get pod "runtime-${SANDBOX_ID}" \
     --output=jsonpath='{.spec.runtimeClassName}'
 )"
+runtime_node="$(
+  kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
+    --namespace sandbox-workloads \
+    get pod "runtime-${SANDBOX_ID}" \
+    --output=jsonpath='{.spec.nodeName}'
+)"
 runtime_subpath="$(
   kubectl --context "${SANDBOX_KUBE_CONTEXT}" \
     --namespace sandbox-workloads \
@@ -220,6 +226,17 @@ runtime_containers="$(
 #When empty, jsonpath cannot obtain the field and returns an empty string, which is exactly equal to the expected value of empty - at the same time
 #It proves that there is indeed no runtimeClassName key in the Pod spec.
 test "$runtime_class" = "${SANDBOX_RUNTIME_CLASS}"
+if [ "${SANDBOX_EXPECT_DEDICATED_RUNTIME_NODE:-0}" = 1 ]; then
+  test "$(kubectl --context "${SANDBOX_KUBE_CONTEXT}" get node "$runtime_node" \
+    --output=jsonpath='{.metadata.labels.sandbox\.hullwork\.com/node-role}')" = runtime
+  control_plane_node="$(
+    kubectl --context "${SANDBOX_KUBE_CONTEXT}" --namespace sandbox-system \
+      get pod -l app.kubernetes.io/name=sandbox-control-plane \
+      --output=jsonpath='{.items[0].spec.nodeName}'
+  )"
+  test -n "$control_plane_node"
+  test "$runtime_node" != "$control_plane_node"
+fi
 case "$workspace_storage_mode" in
   shared) test "$runtime_subpath" = "$WORKSPACE_ID" ;;
   per-workspace) test -z "$runtime_subpath" ;;

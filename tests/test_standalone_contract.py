@@ -199,14 +199,14 @@ class StandaloneContractTests(unittest.TestCase):
         )
         self.assertIn("kind: Component", component)
         self.assertIn("control-plane-sqlite.yaml", component)
-        self.assertIn("workspace-storage-local-path.yaml", component)
+        self.assertNotIn("workspace-storage-local-path.yaml", component)
         self.assertIn("object-store.yaml", component)
         self.assertIn("metrics-server.yaml", component)
         # The local profile must consume that component rather than carry its
         # own copies or point at dependencies outside the cluster.
         local = (ROOT / "overlays/local/kustomization.yaml").read_text(encoding="utf-8")
         self.assertIn("components:\n  - ../local-dev", local)
-        self.assertIn("resources:\n  - ../rwo-single-node", local)
+        self.assertIn("resources:\n  - ../../k8s", local)
         self.assertNotIn("patches:", local)
         self.assertNotIn("control-plane-external.yaml", local)
         self.assertEqual(

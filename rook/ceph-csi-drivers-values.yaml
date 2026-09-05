@@ -1,0 +1,49 @@
+# Rook-compatible values for the independently managed Ceph-CSI drivers.
+# Keep this aligned with the pinned Rook release. Rook 1.20 installs the CSI
+# operator, but deliberately no longer creates Driver resources itself.
+operatorConfig:
+  namespace: rook-ceph
+  driverSpecDefaults:
+    imageSet:
+      name: rook-csi-operator-image-set-configmap
+    nodePlugin:
+      priorityClassName: system-node-critical
+      # Runtime workers are intentionally tainted. CSI is node infrastructure,
+      # so it must still register there before CephFS-backed Runtimes can mount.
+      tolerations:
+        - key: sandbox.hullwork.com/node-role
+          operator: Equal
+          value: runtime
+          effect: NoSchedule
+    controllerPlugin:
+      priorityClassName: system-cluster-critical
+
+drivers:
+  rbd:
+    enabled: true
+    name: rook-ceph.rbd.csi.ceph.com
+    nodePlugin:
+      tolerations:
+        - key: sandbox.hullwork.com/node-role
+          operator: Equal
+          value: runtime
+          effect: NoSchedule
+  cephfs:
+    enabled: true
+    name: rook-ceph.cephfs.csi.ceph.com
+    # Ubuntu Noble's 6.8 kernel cannot parse Ceph 20.2.4 AES256K keys. Let the
+    # security-fixed v3.17.1 client select its userspace fallback instead of
+    # forcing the incompatible kernel path or weakening CephX to legacy AES.
+    cephFsClientType: autodetect
+    nodePlugin:
+      tolerations:
+        - key: sandbox.hullwork.com/node-role
+          operator: Equal
+          value: runtime
+          effect: NoSchedule
+  nfs:
+    enabled: false
+    name: rook-ceph.nfs.csi.ceph.com
+  nvmeof:
+    enabled: false
+    name: rook-ceph.nvmeof.csi.ceph.com

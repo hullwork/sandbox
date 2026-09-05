@@ -144,7 +144,7 @@ attributed to a person, so:
 | `SANDBOX_TEMPLATES` | built-in default only | JSON object mapping approved template IDs to image references |
 | `SANDBOX_IMAGE_REGISTRIES` | empty | Allowed literal image prefixes; empty fails closed for API-managed templates |
 | `SANDBOX_MAX_WORKSPACES` | `64` | Global workspace admission cap |
-| `SANDBOX_MAX_RUNTIMES` | `4` | Global Runtime admission cap |
+| `SANDBOX_MAX_RUNTIMES` | `4` | Global Runtime admission cap; `0` pauses new Runtime admission |
 | `SANDBOX_TTL_SECONDS` | `1800` | Idle Runtime TTL |
 | `SANDBOX_RUNTIME_HARD_TTL_SECONDS` | `43200` | Absolute Runtime lifetime |
 | `WORKSPACE_IDLE_TTL_SECONDS` | `21600` | Workspace data idle TTL |

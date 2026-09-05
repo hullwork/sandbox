@@ -6,12 +6,12 @@
     <meta name="theme-color" content="#07090d" />
     <meta
       name="description"
-      content="Sandbox Platform is the open-source, self-hosted execution plane for AI agents: Kubernetes, gVisor, durable workspaces, and fail-closed isolation."
+      content="Sandbox Platform is the open-source, self-hosted execution plane for AI agents: kubeadm, scalable gVisor workers, durable workspaces, and fail-closed isolation."
     />
     <meta property="og:title" content="Sandbox Platform — Agent execution without the leap of faith" />
     <meta
       property="og:description"
-      content="Run untrusted agent code on your own Kubernetes cluster with gVisor isolation and durable workspaces."
+      content="Run untrusted agent code on your own Kubernetes cluster with a scalable gVisor worker pool and durable CephFS workspaces."
     />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://hullwork.github.io/sandbox/" />
@@ -45,7 +45,7 @@
           <h1>Agent execution<br />without the <em>leap of faith.</em></h1>
           <p class="hero-lede">
             Run untrusted shell and file operations on your own Kubernetes cluster.
-            Every runtime is a gVisor Pod. Every workspace survives it. Nothing falls back to your host.
+            Every runtime is a gVisor Pod. Every workspace survives it. Scale workers from zero to N without rebuilding the control plane.
           </p>
           <div class="hero-actions">
             <a class="button primary" href="#quickstart">Run it locally <span aria-hidden="true">→</span></a>
@@ -55,6 +55,7 @@
             <span>MIT licensed</span>
             <span>Self-hosted</span>
             <span>kubeadm</span>
+            <span>Elastic workers</span>
             <span>No vendor runtime</span>
           </div>
         </div>
@@ -71,6 +72,7 @@
               <p><span class="prompt">$</span> make quickstart</p>
               <p class="dim">[1/5] checking host prerequisites</p>
               <p><span class="ok">✓</span> kubeadm cluster ready</p>
+              <p><span class="ok">✓</span> Runtime worker pool ready</p>
               <p><span class="ok">✓</span> gVisor kernel verified</p>
               <p><span class="ok">✓</span> workspace survived restart</p>
               <p><span class="ok">✓</span> host fallback blocked</p>
@@ -86,7 +88,7 @@
       <section class="metrics container reveal" aria-label="Key project metrics">
         <article><strong>2.497<span>s</span></strong><p>cold start p50</p></article>
         <article><strong>35.72<span>ms</span></strong><p>warm execution p50</p></article>
-        <article><strong>839</strong><p>contract tests</p></article>
+        <article><strong>844</strong><p>contract tests</p></article>
         <article><strong>0</strong><p>host fallbacks</p></article>
       </section>
 
@@ -120,13 +122,13 @@
           </div>
           <div class="boundary"><span>default-deny NetworkPolicy</span></div>
           <div class="arch-layer runtime-layer">
-            <span class="layer-label">UNTRUSTED · SANDBOX-WORKLOADS</span>
+            <span class="layer-label">UNTRUSTED · GVISOR WORKER POOL · 0…N</span>
             <div class="runtime-pod">
               <span class="runtime-badge">gVisor RuntimeClass</span>
-              <b>Ephemeral Runtime Pod</b>
+              <b>Ephemeral Runtime Pods × N</b>
               <div class="runtime-details"><span>non-root</span><span>read-only root</span><span>no SA token</span></div>
             </div>
-            <div class="workspace-node"><b>Durable Workspace</b><small>PVC · independent lifecycle</small></div>
+            <div class="workspace-node"><b>Durable Workspace</b><small>CephFS RWX · survives worker churn</small></div>
           </div>
         </div>
       </section>
@@ -162,6 +164,18 @@
               <p>No Docker socket, no service-account token, non-root processes, and a read-only root filesystem.</p>
               <code>kernel = gVisor</code>
             </article>
+            <article class="proof-card reveal">
+              <span class="proof-number">05</span>
+              <h3>Elastic Runtime workers</h3>
+              <p>Add workers without rebuilding the control plane. Scale-down preflights every target and refuses to strand an active Runtime.</p>
+              <code>make scale-workers WORKERS=N</code>
+            </article>
+            <article class="proof-card reveal">
+              <span class="proof-number">06</span>
+              <h3>One cluster. No hidden coupling.</h3>
+              <p>A standalone kubeadm topology with ordinary labels, taints, RuntimeClass, and RWX storage. No infrastructure repository is imported.</p>
+              <code>control plane + worker pool</code>
+            </article>
           </div>
         </div>
       </section>
@@ -193,7 +207,7 @@
               <div class="bar-track"><i style="--bar: 22%"></i></div>
               <strong>29.21 ms <small>p50</small></strong>
             </div>
-            <p class="benchmark-note">Transparent scope: local, single-node, warm images. Not presented as a cloud or node-cold result.</p>
+            <p class="benchmark-note">Transparent scope: local, multi-node kubeadm, warm images. Not presented as a cloud or node-cold result.</p>
           </div>
         </div>
       </section>
@@ -204,8 +218,9 @@
             <div class="kicker">From clone to proof</div>
             <h2>One command. A real kubeadm cluster.</h2>
             <p>
-              The quickstart creates an isolated Lima VM, installs Kubernetes and gVisor,
-              deploys the platform, and exercises the security and persistence contract.
+              The quickstart creates a control-plane VM plus a scalable Runtime worker pool, installs kubeadm and gVisor,
+              deploys the platform, and exercises the security and persistence contract. Resize later with
+              <code>make scale-workers WORKERS=N</code>.
             </p>
           </div>
           <div class="command-block">

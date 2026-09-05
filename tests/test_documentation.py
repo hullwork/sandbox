@@ -119,18 +119,26 @@ class DocumentationTests(unittest.TestCase):
 
     def test_documented_vm_disk_matches_installer_default(self) -> None:
         script = (ROOT / "scripts/local-cluster.sh").read_text(encoding="utf-8")
-        match = re.search(r'VM_DISK_GIB="\$\{SANDBOX_LOCAL_DISK_GIB:-(\d+)\}"', script)
-        self.assertIsNotNone(match)
-        size = match.group(1)
+        control_match = re.search(
+            r'CONTROL_PLANE_DISK_GIB="\$\{SANDBOX_LOCAL_DISK_GIB:-(\d+)\}"',
+            script,
+        )
+        worker_match = re.search(
+            r'RUNTIME_DISK_GIB="\$\{SANDBOX_LOCAL_WORKER_DISK_GIB:-(\d+)\}"',
+            script,
+        )
+        self.assertIsNotNone(control_match)
+        self.assertIsNotNone(worker_match)
+        control_size = control_match.group(1)
+        worker_size = worker_match.group(1)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         doctor = (ROOT / "scripts/dev-doctor.sh").read_text(encoding="utf-8")
-        self.assertIn(f"{size} GiB disk by default", readme)
-        self.assertIn(f"its {size} GiB disk", readme)
-        self.assertIn(f"a {size} GiB disk", doctor)
-        self.assertIn("DEFAULT_MIN_MEMORY_GIB=6.5", doctor)
-        self.assertIn("DEFAULT_MIN_DISK_GIB=25", doctor)
-        self.assertIn("**6.5 GiB free**", readme)
-        self.assertIn("**25 GiB free**", readme)
+        self.assertIn(f"a {control_size} GiB disk", readme)
+        self.assertIn(f"{worker_size} GiB disk", readme)
+        self.assertIn("DEFAULT_MIN_MEMORY_GIB=2", doctor)
+        self.assertIn("DEFAULT_MIN_DISK_GIB=5", doctor)
+        self.assertIn("**10.5 GiB free**", readme)
+        self.assertIn("**35 GiB free**", readme)
 
     def test_mysql_driver_documentation_matches_the_image(self) -> None:
         dockerfile = (ROOT / "control_plane/Dockerfile").read_text(encoding="utf-8")
