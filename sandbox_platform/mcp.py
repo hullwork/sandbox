@@ -105,7 +105,10 @@ TOOLS = [
         "name": "sandbox_status",
         "description": (
             "Show this process's cached lease for the session: workspace and "
-            "runtime (gVisor Pod) ids as last seen. It does not contact the "
+            "Runtime ids as last seen, plus runtime_class, the RuntimeClass the "
+            "Control Plane reported placing the Runtime under - 'gvisor' only "
+            "where the deployment actually configures it, 'cluster-default' "
+            "where it does not, null with no Runtime. It does not contact the "
             "Control Plane, so it cannot tell whether either is still reachable; "
             "run shell to find out."
         ),
@@ -260,7 +263,13 @@ def call_tool(name: str, arguments: dict) -> dict:
         # implementation only: Runtime MCP.  No sidecar or volume fallback.
         status = manager.status()
         files = "runtime_mcp" if status.get("runtime_ready") else "offline"
-        return _tool_result({**status, "runtime": "gvisor", "files": files})
+        # runtime_class comes from the lease the Control Plane issued. It used
+        # to be the literal "gvisor", which is a claim about confinement that
+        # this process cannot make: a deployment that leaves
+        # SANDBOX_RUNTIME_CLASS empty places Runtimes on the cluster default
+        # runtime, the Control Plane reports "cluster-default" for it, and the
+        # constant asserted gVisor isolation to the agent anyway.
+        return _tool_result({**status, "files": files})
     if name == "file_read":
         path = arguments.get("path")
         if not isinstance(path, str) or not path:

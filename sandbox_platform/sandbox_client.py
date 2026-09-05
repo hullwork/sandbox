@@ -88,6 +88,12 @@ class Lease:
     #The template actually used by the current runtime. Once the runtime is built, the image is fixed: change the template
     #It must be released first and then created, so remember here that it is used to block "thinking the switch is successful".
     sandbox_template: str | None = None
+    # The RuntimeClass the Control Plane actually placed the Runtime under, as
+    # it reported it. None means no Runtime, or a Control Plane too old to say.
+    # Recorded rather than assumed: a deployment with SANDBOX_RUNTIME_CLASS
+    # empty runs Pods on the cluster default runtime and the Control Plane
+    # answers "cluster-default", which is the opposite of a gVisor claim.
+    sandbox_runtime_class: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -750,6 +756,7 @@ class SandboxManager:
                         #The runtime has been recycled by the control_plane, and the template records must be cleared accordingly.
                         #Otherwise, when rebuilding below, the old template will be compared to a non-existent sandbox.
                         lease.sandbox_template = None
+                        lease.sandbox_runtime_class = None
                     else:
                         lease.sandbox_token = _required_str(
                             result, "access_token", "POST /v1/sandboxes/{id}/token"
@@ -774,6 +781,7 @@ class SandboxManager:
             #The template returned by the Control Plane shall prevail rather than the one in the request: the request can be made without template
             #Using the platform default, only the response knows which one will take effect in the end.
             lease.sandbox_template = result.get("template")
+            lease.sandbox_runtime_class = result.get("runtime_class")
             return lease
 
     def list_runtimes(self) -> list[dict]:
@@ -833,6 +841,7 @@ class SandboxManager:
             )
             lease.sandbox_checked_at = time.time()
             lease.sandbox_template = resolved.get("template")
+            lease.sandbox_runtime_class = resolved.get("runtime_class")
             return lease
 
     def read_file(self, path: str, offset: int = 1, limit: int = 0) -> dict:
@@ -1290,6 +1299,7 @@ class SandboxManager:
                 "sandbox_id": lease.sandbox_id,
                 "runtime_ready": bool(lease.sandbox_id),
                 "template": lease.sandbox_template,
+                "runtime_class": lease.sandbox_runtime_class,
             }
 
     def release_runtime(self, session_key: str | None = None) -> dict:
@@ -1308,6 +1318,7 @@ class SandboxManager:
             lease.sandbox_token_expires_at = 0
             lease.sandbox_checked_at = 0
             lease.sandbox_template = None
+            lease.sandbox_runtime_class = None
             return result
 
 

@@ -24,6 +24,33 @@ class McpToolContractTests(unittest.TestCase):
         self.assertIn("does not contact the Control Plane", description)
         self.assertIn("cached lease", description)
 
+    def test_status_reports_the_reported_runtime_class_not_a_constant(self) -> None:
+        """The agent-facing status must not assert gVisor on a cluster without it.
+
+        ``sandbox_status`` used to merge the literal ``"runtime": "gvisor"``
+        into its result. A deployment that leaves ``SANDBOX_RUNTIME_CLASS``
+        empty runs Runtimes on the cluster default runtime; the Control Plane
+        reports ``cluster-default`` for exactly that case
+        (``test_empty_runtime_class_reports_cluster_default_not_gvisor_isolation``)
+        and the Console renders it, while this surface - the one an agent uses
+        to reason about its own confinement - claimed isolation regardless.
+        """
+        recorded = {
+            "session_id": "s", "workspace_id": "ws-000000000000",
+            "workspace_ready": True, "sandbox_id": "sb-000000000000",
+            "runtime_ready": True, "template": "default",
+            "runtime_class": "cluster-default",
+        }
+        original = mcp.manager.status
+        mcp.manager.status = lambda *args, **kwargs: dict(recorded)
+        try:
+            result = mcp.call_tool("sandbox_status", {})
+        finally:
+            mcp.manager.status = original
+        payload = result["structuredContent"]
+        self.assertEqual(payload["runtime_class"], "cluster-default")
+        self.assertNotIn("gvisor", str(payload))
+
 
 if __name__ == "__main__":
     unittest.main()
