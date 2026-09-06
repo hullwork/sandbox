@@ -238,6 +238,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return payload
 
+    def read_optional_json(self) -> dict:
+        """Body-or-empty, for a route whose request body the contract marks optional.
+
+        ``read_json`` is right for every other POST: a missing body there is a
+        client that forgot the payload, and answering 400 says so. The
+        checkpoint-restore body carries one optional field, so the OpenAPI
+        declares ``required: false`` and a conforming client sends no body at
+        all - and used to be told ``Content-Length is required``.
+
+        🔴 Absent is not the same as unreadable. A chunked body has no
+        Content-Length either, and this server never decodes one; treating that
+        as "no sha256 supplied" would restore an archive **without** the
+        integrity check the caller asked for, which is the one thing this body
+        exists to request. Only a body that is genuinely absent becomes {}.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("chunked request bodies are not supported")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or raw_length.strip() in {"", "0"}:
+            return {}
+        return self.read_json()
+
     def bearer_token(self) -> str:
         return control_plane.parse_bearer_token(self.headers.get("Authorization", ""))
 
@@ -2434,7 +2456,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not self.require_workspace_tenant(workspace_id):
                     return
                 control_plane.touch_workspace(workspace_id)
-                payload = self.read_json()
+                payload = self.read_optional_json()
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.restore_workspace_checkpoint(
