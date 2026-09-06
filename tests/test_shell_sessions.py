@@ -597,6 +597,54 @@ class ShellSessionTests(unittest.TestCase):
             os.fstat(master_fd)
 
 
+class ActivityProbeBudgetTests(unittest.TestCase):
+    """The bar the eviction test holds must stay under the probe that enforces it.
+
+    ``SessionManagerEvictionTests`` proves ``activity_snapshot`` is not blocked
+    by an eviction, and it does so against ``PROBE_BUDGET``, a constant local to
+    this file. The timeout that actually deletes Runtimes is
+    ``ACTIVITY_PROBE_TIMEOUT`` in ``control_plane/core.py``, in another
+    component. Nothing tied the two together, so lowering the control-plane
+    timeout below the runtime-side bar would leave the suite green while a probe
+    that timed out started reporting working Runtimes as deletable.
+
+    The default is read out of the source rather than imported: importing
+    ``control_plane.core`` needs a configured Kubernetes environment, and this
+    check needs one number.
+    """
+
+    @staticmethod
+    def control_plane_probe_default() -> float:
+        source = (
+            pathlib.Path(__file__).resolve().parents[1] / "control_plane/core.py"
+        ).read_text(encoding="utf-8")
+        match = re.search(
+            r'ACTIVITY_PROBE_TIMEOUT = float\(\s*os\.getenv\(\s*"SANDBOX_ACTIVITY_PROBE_TIMEOUT",\s*"([0-9.]+)"',
+            source,
+        )
+        assert match, "ACTIVITY_PROBE_TIMEOUT is no longer read from SANDBOX_ACTIVITY_PROBE_TIMEOUT"
+        return float(match.group(1))
+
+    def test_the_eviction_bar_stays_below_the_control_plane_probe(self) -> None:
+        probe = self.control_plane_probe_default()
+        self.assertLess(
+            SessionManagerEvictionTests.PROBE_BUDGET,
+            probe,
+            "the eviction test asserts a bar the deleting probe no longer allows",
+        )
+
+    def test_the_induced_reap_would_actually_cross_that_probe(self) -> None:
+        # The eviction test is only evidence if its induced slowness is enough
+        # to trip the real probe when the lock is held. SLOW_REAP below the
+        # probe timeout would make a passing run prove nothing.
+        self.assertGreaterEqual(
+            SessionManagerEvictionTests.SLOW_REAP,
+            self.control_plane_probe_default(),
+            "SLOW_REAP no longer exceeds the probe timeout, so holding the lock "
+            "would not be caught",
+        )
+
+
 @unittest.skipUnless(os.path.exists(BASH), "bash is required for PTY session tests")
 class SessionManagerEvictionTests(unittest.TestCase):
     """Eviction must not reap a process while holding the manager lock.
