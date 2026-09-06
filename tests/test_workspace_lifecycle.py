@@ -164,6 +164,23 @@ PROBE = textwrap.dedent(
         ws = lease["workspace_id"]
         scoped = lease["access_token"]
 
+        # /v1/workspaces/resolve derives the Workspace ID from the caller's own
+        # credential, so a miss there is "this session has no Workspace yet",
+        # never "someone is probing another tenant". It must file no denial:
+        # one per Workspace ever created would bury the cross-tenant rows below,
+        # which are the only thing this table exists to surface.
+        results["denied_before_resolve"] = sorted(
+            (row["action"], row["target"])
+            for row in control_plane.STORE.list_audit(limit=200)
+            if row.get("outcome") == "denied"
+        )
+        call("a_resolve_fresh", "POST", "/v1/workspaces/resolve", key_a, {"session_id": "session-never-used"})
+        results["denied_after_resolve"] = sorted(
+            (row["action"], row["target"])
+            for row in control_plane.STORE.list_audit(limit=200)
+            if row.get("outcome") == "denied"
+        )
+
         backdate(ws, 7200)
         results["age_before"] = age(ws)
         # Denied by ownership: must not move the clock.
@@ -287,6 +304,16 @@ class DeniedAuditThrottleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.results = cached_probe()
+
+    def test_resolving_a_session_without_a_workspace_files_no_denial(self) -> None:
+        # 404 is the right answer and the ownership check still runs; what must
+        # not happen is an audit row shaped exactly like a cross-tenant probe.
+        self.assertEqual(self.results["a_resolve_fresh"]["status"], 404)
+        self.assertEqual(
+            [tuple(row) for row in self.results["denied_after_resolve"]],
+            [tuple(row) for row in self.results["denied_before_resolve"]],
+            "resolve filed a denial for a Workspace the caller's own credential derived",
+        )
 
     def test_repeated_denials_by_one_actor_on_one_target_write_one_row(self) -> None:
         for name in ("b_files", "b_files_again", "b_checkpoints", "b_other_target"):

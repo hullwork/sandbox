@@ -14,13 +14,41 @@ helm template sandbox charts/sandbox
 
 `values.schema.json` validates the public configuration surface. Every product
 image accepts an immutable `sha256:` digest; when set, the digest takes
-precedence over its tag. What the chart needs from the cluster - a PostgreSQL or
-MySQL database, S3-compatible object storage, an RWX StorageClass, and a gVisor
-RuntimeClass - is configured through `values.yaml` and described in the
+precedence over its tag. Three of the four things the chart needs from the
+cluster are `values.yaml` settings: the database (`postgresql.*`, embedded by
+default), S3-compatible object storage (`objectStore.*`), and an RWX
+StorageClass (`workspace.storageClass`). The fourth is not. The chart creates
+the `gvisor` RuntimeClass itself and pins `SANDBOX_RUNTIME_CLASS` to it with no
+value to override, so installing the `runsc` handler on every node that will
+host Runtimes is a prerequisite, not a configuration choice: without it the Pods
+schedule and then loop in `RunContainerError`. All four are described in the
 [Production guide](PRODUCTION.md).
 
 The existing Kustomize bases remain supported for source deployments. The Helm
 chart is the versioned package boundary for external GitOps composition.
+
+### Install order
+
+The chart creates both namespaces, and it creates no Secrets. Those two facts
+fix the order: creating `sandbox-system` yourself so you can put the Secrets in
+it first makes `helm install` refuse the namespace it does not own
+(`invalid ownership metadata; ... missing key "app.kubernetes.io/managed-by"`).
+Install first, then fill in the Secrets from
+[Pre-provisioned resources](#pre-provisioned-resources), then restart the three
+workloads that mount them:
+
+```bash
+helm install sandbox charts/sandbox --set workspace.storageClass=<your-rwx-class>
+# create the four Secrets here
+kubectl -n sandbox-system rollout restart deploy/sandbox-control-plane statefulset/sandbox-postgres
+kubectl -n sandbox-workloads rollout restart deploy/sandbox-volume
+```
+
+Between the first and second step the Control Plane, PostgreSQL, and Volume
+Agent Pods restart on missing Secrets; that is expected and clears on the
+rollout. A GitOps controller does not need the restarts: it reconciles the
+Secrets alongside the release, and only the namespace objects have to stay
+owned by the chart.
 
 This is a multi-namespace package. Override `namespaces.system` and
 `namespaces.workloads` together; an Infra Stack destination namespace does not
@@ -184,6 +212,16 @@ The base manifests reference these objects by name and never create them. The
 local profile generates the Secrets with random values
 (`scripts/bootstrap-local-secrets.sh`); every other environment must create them
 before `kubectl apply`.
+
+Both namespaces ship with `pod-security.kubernetes.io/enforce: restricted`, so
+anything you add alongside them - the PostgreSQL you bring, a debug Pod, an
+object-store shim - has to satisfy that profile too: `runAsNonRoot: true`,
+`allowPrivilegeEscalation: false`, `capabilities.drop: ["ALL"]`, and
+`seccompProfile.type: RuntimeDefault`. Stock database images do not set these,
+and the rejection arrives from the ReplicaSet controller as a `FailedCreate`
+event rather than from `kubectl apply`, so the Deployment looks accepted while
+no Pod is ever created. Put such a dependency in its own namespace, or add the
+security context.
 
 | Resource | Kind | Namespace | Keys or requirement |
 | --- | --- | --- | --- |

@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from bench.runner import BenchmarkRun, evaluate_thresholds, metric_summary, percentile
+from bench import runner
+from bench.runner import (
+    BenchmarkRun,
+    command_output,
+    evaluate_thresholds,
+    metric_summary,
+    percentile,
+)
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -91,6 +99,94 @@ class BenchmarkMathTests(unittest.TestCase):
         self.assertTrue(all(item["ok"] for item in recorded))
         self.assertIn(("DELETE", "/v1/sandboxes/sb-test"), client.calls)
         self.assertIn(("DELETE", "/v1/workspaces/ws-test?purge=true"), client.calls)
+
+    def test_the_runtime_class_that_ran_is_taken_from_the_lease(self) -> None:
+        """What the Pods ran under is an observation, not a cluster fact.
+
+        ``environment.json`` dumps the ``gvisor`` RuntimeClass object, and it is
+        written before the first Runtime exists. A deployment that leaves
+        ``SANDBOX_RUNTIME_CLASS`` empty has that object and still places every
+        Pod on the cluster default runtime, so the snapshot alone would let a
+        report read as a gVisor measurement when it is not one. Each lease says
+        which class it got; the summary reports those.
+        """
+        class FakeClient:
+            def request(self, method: str, path: str, **kwargs: object) -> tuple[int, object]:
+                if path == "/healthz":
+                    return 200, {"status": "ok"}
+                if method == "POST" and path == "/v1/workspaces":
+                    return 201, {"workspace_id": "ws-test", "access_token": "workspace-token"}
+                if method == "POST" and path == "/v1/sandboxes":
+                    return 201, {
+                        "id": "sb-test",
+                        "access_token": "sandbox-token",
+                        "runtime_class": "cluster-default",
+                    }
+                if path.endswith("/mcp"):
+                    return 200, {"jsonrpc": "2.0", "result": {"structuredContent": {
+                        "exit_code": 0, "stdout": "bench-ready",
+                    }}}
+                if path.endswith("/files/write"):
+                    return 200, {"ok": True}
+                if "/files/read?" in path:
+                    return 200, {"content": "x" * 1024}
+                if method == "DELETE":
+                    return 200, {"ok": True}
+                raise AssertionError((method, path, kwargs))
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = BenchmarkRun(  # type: ignore[arg-type]
+                FakeClient(), pathlib.Path(directory) / "samples.jsonl", "unit"
+            )
+            run.one_iteration(0)
+        self.assertEqual(run.runtime_classes, {"cluster-default"})
+
+    def test_a_lease_without_the_field_is_recorded_as_unreported(self) -> None:
+        # A Control Plane too old to send runtime_class is not evidence of
+        # gVisor and not evidence against it. It must not become "gvisor" by
+        # omission, and it must not crash the summary's sort either.
+        class FakeClient:
+            def request(self, method: str, path: str, **kwargs: object) -> tuple[int, object]:
+                if path == "/healthz":
+                    return 200, {"status": "ok"}
+                if method == "POST" and path == "/v1/workspaces":
+                    return 201, {"workspace_id": "ws-test", "access_token": "workspace-token"}
+                if method == "POST" and path == "/v1/sandboxes":
+                    return 201, {"id": "sb-test", "access_token": "sandbox-token"}
+                if path.endswith("/mcp"):
+                    return 200, {"jsonrpc": "2.0", "result": {"structuredContent": {
+                        "exit_code": 0, "stdout": "bench-ready",
+                    }}}
+                if path.endswith("/files/write"):
+                    return 200, {"ok": True}
+                if "/files/read?" in path:
+                    return 200, {"content": "x" * 1024}
+                if method == "DELETE":
+                    return 200, {"ok": True}
+                raise AssertionError((method, path, kwargs))
+
+        with tempfile.TemporaryDirectory() as directory:
+            run = BenchmarkRun(  # type: ignore[arg-type]
+                FakeClient(), pathlib.Path(directory) / "samples.jsonl", "unit"
+            )
+            run.one_iteration(0)
+        self.assertEqual(run.runtime_classes, {"unreported"})
+        self.assertEqual(sorted(run.runtime_classes), ["unreported"])
+
+    def test_truncated_command_output_says_so(self) -> None:
+        # A `kubectl get pods -o json` past the cap lands in the report as a
+        # JSON document that stops mid-object. Without the marker the reader
+        # cannot tell that from a command that failed halfway.
+        long_output = command_output(
+            [sys.executable, "-c", f"print('x' * {runner.OUTPUT_CAP + 500})"]
+        )
+        self.assertTrue(long_output["truncated"])
+        self.assertEqual(long_output["fullLength"], runner.OUTPUT_CAP + 500)
+        self.assertEqual(len(long_output["output"]), runner.OUTPUT_CAP)
+
+        short_output = command_output([sys.executable, "-c", "print('ok')"])
+        self.assertNotIn("truncated", short_output)
+        self.assertEqual(short_output["output"], "ok")
 
     def test_cleanup_waits_for_asynchronous_runtime_deletion(self) -> None:
         class FakeClient:

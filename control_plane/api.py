@@ -238,6 +238,28 @@ class ApiHandler(BaseHTTPRequestHandler):
             raise ValueError("request body must be a JSON object")
         return payload
 
+    def read_optional_json(self) -> dict:
+        """Body-or-empty, for a route whose request body the contract marks optional.
+
+        ``read_json`` is right for every other POST: a missing body there is a
+        client that forgot the payload, and answering 400 says so. The
+        checkpoint-restore body carries one optional field, so the OpenAPI
+        declares ``required: false`` and a conforming client sends no body at
+        all - and used to be told ``Content-Length is required``.
+
+        🔴 Absent is not the same as unreadable. A chunked body has no
+        Content-Length either, and this server never decodes one; treating that
+        as "no sha256 supplied" would restore an archive **without** the
+        integrity check the caller asked for, which is the one thing this body
+        exists to request. Only a body that is genuinely absent becomes {}.
+        """
+        if self.headers.get("Transfer-Encoding"):
+            raise ValueError("chunked request bodies are not supported")
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None or raw_length.strip() in {"", "0"}:
+            return {}
+        return self.read_json()
+
     def bearer_token(self) -> str:
         return control_plane.parse_bearer_token(self.headers.get("Authorization", ""))
 
@@ -1443,11 +1465,21 @@ class ApiHandler(BaseHTTPRequestHandler):
             self.send_store_outage(exc)
             return None
 
-    def require_workspace_tenant(self, workspace_id: str) -> bool:
+    def require_workspace_tenant(
+        self, workspace_id: str, *, audit_denial: bool = True
+    ) -> bool:
         """Before operating a Workspace by ID, confirm that it belongs to this tenant.
 
         List filtering only blocks "seeing", but this block blocks "guessing the ID and then acting directly".
-        workspace_id is HMAC-derived and non-enumerable, but non-enumerability is not an access control."""
+        workspace_id is HMAC-derived and non-enumerable, but non-enumerability is not an access control.
+
+        audit_denial=False is for the one caller that does not receive an ID at
+        all: /v1/workspaces/resolve derives the ID from this tenant's own
+        credential, so a miss there means "this session has no Workspace yet",
+        never "someone is probing another tenant". Auditing it would file one
+        denial per Workspace ever created, in a row an operator cannot tell
+        apart from a real cross-tenant attempt - which is the only thing this
+        audit exists to surface. The ownership check itself still runs."""
         if control_plane.STORE is None or self.tenant_id is None:
             return True
         matches = self._workspace_owner_matches(workspace_id)
@@ -1459,7 +1491,8 @@ class ApiHandler(BaseHTTPRequestHandler):
         #That's a signal that can be used to enumerate.
         #But the rejection itself leaves a mark - continuous rejection means someone is testing the ID, which is a precursor to an attack.
         #Instead of noise, there is precisely nothing to say in the response.
-        self.audit("workspace.access", target=workspace_id, outcome="denied")
+        if audit_denial:
+            self.audit("workspace.access", target=workspace_id, outcome="denied")
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "workspace not found"})
         return False
 
@@ -2423,7 +2456,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not self.require_workspace_tenant(workspace_id):
                     return
                 control_plane.touch_workspace(workspace_id)
-                payload = self.read_json()
+                payload = self.read_optional_json()
                 self.send_json(
                     HTTPStatus.OK,
                     control_plane.restore_workspace_checkpoint(
@@ -2808,7 +2841,9 @@ class ApiHandler(BaseHTTPRequestHandler):
                     principal_kind=principal_kind,
                     principal_id=principal_id,
                 )
-                if not self.require_workspace_tenant(workspace_id):
+                if not self.require_workspace_tenant(
+                    workspace_id, audit_denial=False
+                ):
                     return
                 status, listing, content_type = control_plane.volume_agent_request(
                     "GET", "/v1/workspaces"

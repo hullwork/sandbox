@@ -150,7 +150,7 @@ attributed to a person, so:
 | `WORKSPACE_IDLE_TTL_SECONDS` | `21600` | Workspace data idle TTL |
 | `SANDBOX_WORKSPACE_QUOTA` | `1Gi` | Requested PVC size in optional per-workspace mode |
 | `SANDBOX_PENDING_STALE_SECONDS` | `600` | Age after which a `pending` Runtime admission record is treated as abandoned and its slot released; keep well above the Runtime creation budget |
-| `SANDBOX_ACTIVITY_PROBE_TIMEOUT` | `2` | Seconds allowed for the Runtime activity check that runs before an idle Runtime is evicted |
+| `SANDBOX_ACTIVITY_PROBE_TIMEOUT` | `2` | Seconds allowed for the Runtime activity check that runs before an idle Runtime is evicted. A timeout counts as "not busy", so lowering it deletes working Runtimes: the probe reads in-process session state, and `runtime/shell_sessions.py` records 2.60s for that read on a Runtime reaping a SIGKILLed child under gVisor with `cpu: 500m`. The margin is small and it is a property of the isolation backend's syscall cost, not of this setting; re-measure before lowering it or changing RuntimeClass |
 | `SANDBOX_MAX_OBJECT_QUEUE` | `32` | Requests allowed to wait for the object-store slot; beyond it Control Plane answers `503` at once |
 | `SANDBOX_MAX_CONCURRENT_OBJECT_OPS` | `1` | Object-store operations in flight at once; each holds its body in memory, and the boto3 connection pool is sized to match |
 | `SANDBOX_MAX_LIST_ENTRIES` | `10000` | Rows one listing may return before it is refused. `read_timeout` bounds a single socket read, not an operation, so without this a slow trickle holds the operation slot indefinitely while the list grows in memory |

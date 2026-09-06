@@ -378,4 +378,15 @@ curl --fail-with-body --silent --show-error \
   "${API_URL}/v1/workspaces/${SDK_WORKSPACE_ID}?purge=true" >/dev/null
 SDK_WORKSPACE_ID=""
 
-echo "Sandbox E2E passed: Runtime MCP files/shell + shared Workspace + gVisor"
+#The isolation assertion above is conditional on SANDBOX_RUNTIME_CLASS, and the
+#comment at the assertion says why: on the cluster default runtime the dmesg line
+#is the host kernel's, so asserting it would be a false alarm. This line has to
+#follow the same condition. Announcing "+ gVisor" after skipping the check is the
+#report claiming a property the run never observed - and an empty runtimeClass is
+#a supported configuration, not a misconfiguration.
+if [ "$SANDBOX_RUNTIME_CLASS" = gvisor ]; then
+  isolation_result="gVisor"
+else
+  isolation_result="runtimeClass=${SANDBOX_RUNTIME_CLASS:-<cluster default>}, isolation not asserted"
+fi
+echo "Sandbox E2E passed: Runtime MCP files/shell + shared Workspace + ${isolation_result}"

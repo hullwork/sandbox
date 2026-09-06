@@ -1,5 +1,13 @@
 FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
 
+# Temporary, until the base image is rebuilt: this digest ships libuuid
+# 2.42.1-r0 (CVE-2026-53612/53613/53614, CVE-2026-76642, CVE-2026-78408/78409/78410)
+# while Alpine 3.24 already carries the fixed 2.42.3-r1, so the image gate would
+# refuse it. Remove the two lines below once a newer base digest passes
+# `trivy image` on its own; they are the one place this build reaches the
+# package index after the FROM.
+RUN apk upgrade --no-cache libuuid
+
 RUN addgroup -g 65532 control-plane \
     && adduser -D -u 65532 -G control-plane -h /nonexistent control-plane
 

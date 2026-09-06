@@ -50,7 +50,7 @@ operation fails; it never falls back to running on the host.
 
 ```bash
 make bootstrap                 # create .venv and install SDK + test dependencies
-make test                      # 844 unit and contract tests, no network, no cluster
+make test                      # 870 unit and contract tests, no network, no cluster
 make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```
@@ -201,7 +201,7 @@ it first rather than discovering a gap halfway through the VM build.
 
 | Requirement | Detail |
 | --- | --- |
-| Commands on `PATH` | `docker` (daemon reachable), `limactl`, `kubectl`, `helm`, `python3`, `openssl` |
+| Commands on `PATH` | `docker` (daemon reachable), `limactl`, `kubectl`, `helm`, `python3`, `openssl`; on Linux also `qemu-system-<arch>` and `shasum`. Lima has one vmType on Linux, qemu, and boots the VM with the host architecture's system emulator, which `limactl` does not ship; `shasum` is what the Cilium and Rook chart installers verify with. macOS uses its own hypervisor framework and needs neither. |
 | Python | 3.11 or newer |
 | Host OS | macOS or Linux |
 | Host architecture | amd64 or arm64 (`scripts/local-cluster.yaml` pins Ubuntu images for both; gVisor is installed for `x86_64` and `aarch64`) |

@@ -57,6 +57,47 @@ class HelmPackageContractTests(unittest.TestCase):
         self.assertIn("digest", image_with_policy)
         self.assertIn("sha256", image["digest"]["pattern"])
 
+    def test_the_documented_restart_set_matches_what_mounts_the_secrets(self) -> None:
+        """Every rendered workload that mounts a pre-provisioned Secret is named.
+
+        The chart owns both namespaces and creates none of the four Secrets, so
+        `helm install` has to run before they can exist and the workloads that
+        want them come up first and fail. The install-order section is the only
+        place that says which ones to restart; a workload added later that also
+        mounts one of these Secrets would silently stay broken.
+        """
+        if not shutil.which("helm"):
+            self.skipTest("helm is not installed")
+        rendered = subprocess.run(
+            ["helm", "template", "sandbox", str(CHART)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        wanted = {
+            "sandbox-api-credentials",
+            "sandbox-postgres-auth",
+            "object-store-credentials",
+            "sandbox-volume-auth",
+        }
+        consumers = set()
+        for document in yaml.safe_load_all(rendered):
+            if not document or document.get("kind") not in {
+                "Deployment", "StatefulSet", "Job", "CronJob",
+            }:
+                continue
+            serialised = yaml.safe_dump(document)
+            if any(name in serialised for name in wanted):
+                consumers.add(document["metadata"]["name"])
+        self.assertTrue(consumers, "no rendered workload mounts a pre-provisioned Secret")
+        guide = (ROOT / "docs/DEPLOYMENT.md").read_text(encoding="utf-8")
+        start = guide.index("### Install order")
+        section = guide[start:guide.index("\nThis is a multi-namespace package", start)]
+        missing = sorted(name for name in consumers if name not in section)
+        self.assertEqual(
+            missing, [], f"install order does not say to restart: {missing}"
+        )
+
     def test_embedded_postgres_accepts_only_control_plane_ingress(self) -> None:
         if not shutil.which("helm"):
             self.skipTest("helm is not installed")

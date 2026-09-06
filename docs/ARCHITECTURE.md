@@ -142,8 +142,12 @@ is valid only when both services intentionally address the same objects.
 
 The component is named `Sandbox Control Plane` throughout the source package,
 image, Kubernetes resources, token audience, client configuration, and
-observability artifacts. Process roles are `api` and `volume`; the Runtime
-provider is selected independently by `SANDBOX_RUNTIME_DRIVER`.
+observability artifacts. Process roles are `api` and `volume`. The Runtime
+provider is named by `SANDBOX_RUNTIME_DRIVER`, which is validated at startup and
+is not a selector: this release ships one provider, and `configured_runtime_driver()`
+constructs it without reading the variable. Any value other than `gvisor` exits
+rather than starting, which is the same promise the README makes - no provider
+plug-in surface is advertised that does not exist.
 
 ## Known split debt
 

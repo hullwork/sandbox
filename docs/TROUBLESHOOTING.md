@@ -59,10 +59,14 @@ elsewhere).
 
 ```bash
 kubectl get runtimeclass gvisor
-kubectl get nodes --show-labels | grep sandbox-node
+kubectl get nodes -l sandbox.hullwork.com/node-role=runtime
 kubectl -n sandbox-workloads get pods
 kubectl -n sandbox-workloads describe pod <pod> | sed -n '/Events/,$p'
 ```
+
+The selector is the placement label itself, so an empty node list *is* the
+finding. Substitute your own key when the deployment sets a different
+`SANDBOX_RUNTIME_NODE_SELECTOR`.
 
 `describe` shows `FailedCreatePodSandBox ... runsc` when the handler is missing on the
 node and `0/N nodes are available: node(s) didn't match Pod's node affinity/selector`

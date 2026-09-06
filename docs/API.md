@@ -193,6 +193,33 @@ Two properties worth knowing before you wire it in:
   exception is a management-plane credential naming an `owner` outright, which
   needs no subject to build a partition from.
 
+### Object namespace
+
+Object keys are built by the platform, never by the caller: the owner segment comes
+from the credential and `X-Acting-Subject`, and the rest from a locator. Both scopes
+constrain the first path segment, and a value outside the set is a `400` naming the
+allowed roots.
+
+| Scope | Locator also needs | `path` must start with | Resulting key |
+| --- | --- | --- | --- |
+| `upload` | `upload_id` | `source/`, `derived/`, `meta/` | `users/<tenant>/<subject>/uploads/<upload_id>/<path>` |
+| `agent` | `agent_id`, `run_id` | `inputs/`, `outputs/`, `artifacts/`, `logs/`, `meta/` | `users/<tenant>/<subject>/agents/<agent_id>/runs/<run_id>/<path>` |
+
+`upload_id`, `agent_id` and `run_id` are lowercase DNS-style identifiers. A path may
+not be absolute, contain `..`, or exceed 512 bytes.
+
+The two routes that move bytes between a Workspace and an object are narrower still,
+and in opposite directions:
+
+| Route | Object side | Workspace side |
+| --- | --- | --- |
+| `POST /v1/workspaces/{id}/objects/export` | `scope=agent` only | `workspace_path` must start with `artifacts/`; an `archive: true` export must name exactly `artifacts` |
+| `POST /v1/workspaces/{id}/objects/import` | `scope=upload` only | destination must start with `data/uploads/` |
+
+The asymmetry is the point: what an agent produced leaves through `artifacts/`, and
+what a user supplied enters under `data/uploads/`, so neither can be mistaken for the
+other after the fact.
+
 ### Blocking, idempotency, and retry
 
 The SDK performs **no retries and no backoff** of its own. Per ADR 0001, callers

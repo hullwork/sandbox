@@ -28,6 +28,10 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_THRESHOLDS = ROOT / "bench/excellent-thresholds.json"
 PROTOCOL_VERSION = "2026-07-28"
+# Captured command output is capped so one `kubectl get pods -o json` cannot
+# dominate the report. Exceeding it is recorded rather than left to be
+# discovered as a JSON decode error.
+OUTPUT_CAP = 20_000
 
 
 def utc_now() -> str:
@@ -160,11 +164,19 @@ def command_output(command: list[str]) -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired) as error:
         return {"available": False, "error": type(error).__name__}
     output = completed.stdout.strip() or completed.stderr.strip()
-    return {
+    # `kubectl get pods -o json` routinely passes the cap, and a JSON document
+    # cut mid-object is not distinguishable from a broken command once it is in
+    # the report: a reader parsing it gets a decode error and no reason for it.
+    # The cap stays; what changes is that the file now says so.
+    captured = {
         "available": completed.returncode == 0,
         "returnCode": completed.returncode,
-        "output": output[:20_000],
+        "output": output[:OUTPUT_CAP],
     }
+    if len(output) > OUTPUT_CAP:
+        captured["truncated"] = True
+        captured["fullLength"] = len(output)
+    return captured
 
 
 def environment_snapshot(base_url: str, kube_context: str | None) -> dict[str, Any]:
@@ -202,6 +214,13 @@ class BenchmarkRun:
         self.sample_file = sample_file
         self.run_id = run_id
         self.samples: list[dict[str, Any]] = []
+        # Every Runtime lease reports the RuntimeClass the Control Plane placed
+        # it under. The environment snapshot cannot answer this: it is taken
+        # before the first Runtime exists, and the `gvisor` RuntimeClass object
+        # it dumps is a cluster fact, not a statement about what these
+        # measurements ran on. A deployment with SANDBOX_RUNTIME_CLASS empty
+        # has that object and still runs every Pod on the default runtime.
+        self.runtime_classes: set[str] = set()
 
     def measure(self, metric: str, iteration: int, operation: Any) -> Any:
         started = time.perf_counter()
@@ -304,6 +323,13 @@ class BenchmarkRun:
             )
             sandbox_id = sandbox["id"]
             sandbox_token = sandbox["access_token"]
+            # "cluster-default" here means the Pods these numbers describe ran
+            # without gVisor. Recorded per lease, so the summary states what
+            # was measured rather than what the cluster could have offered.
+            # "unreported" rather than a guess: a Control Plane too old to send
+            # the field is not evidence of gVisor, and it is not evidence
+            # against it either. Sorting the set needs a string for that case.
+            self.runtime_classes.add(sandbox.get("runtime_class") or "unreported")
             mcp_payload = {
                 "jsonrpc": "2.0",
                 "id": f"bench-{iteration}",
@@ -411,6 +437,7 @@ def main() -> int:
         "iterationFailures": failures,
         "thresholdProfile": thresholds["profile"],
         "metrics": summaries,
+        "observedRuntimeClasses": sorted(benchmark.runtime_classes),
         "evaluation": evaluation,
     }
     (args.output_dir / "summary.json").write_text(
