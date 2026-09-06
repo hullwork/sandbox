@@ -45,13 +45,29 @@ provision:
       apt-get -o Acquire::Retries=5 update -qq
       apt-get -o Acquire::Retries=5 install -y -qq containerd apt-transport-https ca-certificates curl gpg
       mkdir -p /etc/containerd /etc/apt/keyrings
-      containerd config default >/etc/containerd/config.toml
-      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-      # apt starts containerd before the generated configuration exists. Restart
-      # it explicitly so kubelet's CRI cgroup-driver discovery sees systemd from
-      # its first boot rather than caching containerd's built-in cgroupfs default.
+      # BEGIN sandbox containerd configuration
+      # Lima reruns system provisioning on restart. Never replace an existing
+      # configuration: gVisor handlers, registry settings and operator edits
+      # are persistent node state, not disposable bootstrap output.
+      containerd_config_changed=0
+      if [ ! -s /etc/containerd/config.toml ]; then
+        containerd config default >/etc/containerd/config.toml
+        containerd_config_changed=1
+      fi
+      if grep -q 'SystemdCgroup = false' /etc/containerd/config.toml; then
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+        containerd_config_changed=1
+      fi
+      # apt starts containerd before first-boot configuration exists. Restart
+      # only when it changed, so CRI sees systemd without restarting a healthy
+      # daemon on every repeat provision.
       systemctl enable containerd
-      systemctl restart containerd
+      if [ "$containerd_config_changed" -eq 1 ]; then
+        systemctl restart containerd
+      else
+        systemctl start containerd
+      fi
+      # END sandbox containerd configuration
       curl --retry 5 --retry-all-errors --retry-delay 2 -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
         | gpg --dearmor --yes -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
       echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /' \

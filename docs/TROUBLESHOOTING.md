@@ -113,6 +113,34 @@ each other even when their displayed addresses match.
 reusing a VM. Preserve any legacy Workspace data, then destroy and recreate the
 local profile. Do not bypass the network compatibility check.
 
+## gVisor disappears after a Lima VM restart
+
+Older local templates unconditionally regenerated `/etc/containerd/config.toml`
+on each boot. The `runsc` binaries remained installed, but the runtime handler
+was lost. Current templates preserve existing containerd configuration and
+restart the daemon only when bootstrap configuration changes.
+
+Existing Lima instances keep a private copy of their provision scripts; pulling
+new repository code is not enough. Check and migrate that copy during an approved
+maintenance window (substitute the exact instance name):
+
+```bash
+python3 scripts/migrate-local-containerd-provision.py sandbox-local --check
+limactl stop sandbox-local
+python3 scripts/migrate-local-containerd-provision.py sandbox-local
+limactl start sandbox-local
+KUBECONFIG="$(scripts/local-cluster.sh kubeconfig)" \
+  bash scripts/install-gvisor-kubeadm.sh sandbox-local
+```
+
+The migration refuses running VMs and unfamiliar/customized containerd blocks,
+changes only the recognized provision block, and verifies the saved template.
+It neither stops the VM itself nor replaces ports, resources, mounts or disks.
+The final installer repairs an already-lost handler and restarts containerd and
+kubelet if needed; it does not migrate the saved Lima template by itself. Verify
+a real gVisor workload after recovery and again after a planned restart. A unit
+test of repeated provision is not evidence of a real node reboot.
+
 ## `ErrImageNeverPull` or `ImagePullBackOff`
 
 **Symptom.** Control Plane, console, volume agent, or Runtime Pods show
