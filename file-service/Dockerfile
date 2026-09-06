@@ -7,6 +7,14 @@ FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b7288748
 #It was SIGKILL (actually measured 10s, 1s with init). When Control Plane deletes a Pod, it passes gracePeriodSeconds: 0
 #This matter is covered up, but node emptying, eviction, and manual kubectl delete all use the default grace period.
 #The version is consistent with sandbox/runtime/Dockerfile (same base digest).
+# Temporary, until the base image is rebuilt: this digest ships libuuid
+# 2.42.1-r0 (CVE-2026-53612/53613/53614, CVE-2026-76642, CVE-2026-78408/78409/78410)
+# while Alpine 3.24 already carries the fixed 2.42.3-r1, so the image gate would
+# refuse it. Remove the two lines below once a newer base digest passes
+# `trivy image` on its own; they are the one place this build reaches the
+# package index after the FROM.
+RUN apk upgrade --no-cache libuuid
+
 RUN apk add --no-cache tini=0.19.0-r3 \
     && addgroup -g 65532 workspace \
     && adduser -D -u 65532 -G workspace -h /workspace workspace \

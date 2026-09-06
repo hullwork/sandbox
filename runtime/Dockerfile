@@ -12,6 +12,14 @@ FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b7288748
 # Deliberately not installed: gcc and other compilation chains (volume ~200MB, few scenarios), openssh (key management interface).
 # All pins are the same as the above bash/tini version by version; dependabot only takes care of the base image above
 # To upgrade digest and apk pin, you need to manually change this.
+# Temporary, until the base image is rebuilt: this digest ships libuuid
+# 2.42.1-r0 (CVE-2026-53612/53613/53614, CVE-2026-76642, CVE-2026-78408/78409/78410)
+# while Alpine 3.24 already carries the fixed 2.42.3-r1, so the image gate would
+# refuse it. Remove the two lines below once a newer base digest passes
+# `trivy image` on its own; they are the one place this build reaches the
+# package index after the FROM.
+RUN apk upgrade --no-cache libuuid
+
 RUN apk add --no-cache bash=5.3.9-r1 tini=0.19.0-r3 \
         nodejs=24.18.1-r0 npm=11.12.1-r0 \
         curl=8.22.0-r0 git=2.54.0-r0 jq=1.8.2-r0 unzip=6.0-r16 make=4.4.1-r4 \
