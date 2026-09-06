@@ -50,7 +50,7 @@ operation fails; it never falls back to running on the host.
 
 ```bash
 make bootstrap                 # create .venv and install SDK + test dependencies
-make test                      # 857 unit and contract tests, no network, no cluster
+make test                      # 860 unit and contract tests, no network, no cluster
 make verify                    # complete Python, Console, manifest, Helm, wheel gate
 make help                      # every Make target with its one-line description
 ```

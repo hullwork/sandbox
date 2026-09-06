@@ -23,9 +23,18 @@ The output directory is new for every run and contains:
 
 - `samples.jsonl`: one measured operation per line, including failures;
 - `warmup-samples.jsonl`: excluded warmup observations, retained for audit;
-- `summary.json`: sample counts, success rates, percentiles, and every threshold check;
+- `summary.json`: sample counts, success rates, percentiles, every threshold check, and
+  `observedRuntimeClasses` - the RuntimeClass each measured Runtime lease actually
+  reported. `["gvisor"]` is what makes a report a gVisor measurement;
+  `["cluster-default"]` says the Pods behind these numbers had no gVisor kernel
+  isolation, whatever the cluster has installed;
 - `environment.json`: source state, OS/architecture/Python, endpoint, Kubernetes version,
-  RuntimeClass, and Pod image identities. It never contains the supplied token.
+  the cluster's `gvisor` RuntimeClass object, and Pod identities. It never contains the
+  supplied token. It is captured **before** the first Runtime is created, so it describes
+  what the cluster offers, not what these measurements ran under - read
+  `observedRuntimeClasses` for that. Captured command output is capped; a capture that
+  hit the cap carries `truncated` and `fullLength`, because a JSON dump cut mid-object
+  is otherwise indistinguishable from a command that failed halfway.
 
 The smoke default is 20 recorded iterations. Formal publication uses at least 100
 iterations and five independent runs on each architecture. Do not combine arm64 and
