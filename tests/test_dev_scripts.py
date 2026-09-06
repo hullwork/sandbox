@@ -224,6 +224,66 @@ class PrerequisiteDocumentationTests(unittest.TestCase):
         self.assertEqual(missing, [], f"README prerequisites omit: {missing}")
 
 
+class E2EVerdictTests(unittest.TestCase):
+    """The E2E's closing line may not claim isolation the run skipped.
+
+    `scripts/test.sh` asserts the gVisor self-report only when
+    `SANDBOX_RUNTIME_CLASS` is `gvisor`, and the comment at the assertion says
+    why: on the cluster default runtime that dmesg line belongs to the host
+    kernel, so asserting it would be a false alarm. The closing line said
+    "+ gVisor" unconditionally, so a run against an empty runtimeClass - a
+    supported configuration, and what the AI-LOCK in `control_plane/core.py`
+    requires on nodes without runsc - announced a property nothing checked.
+    """
+
+    def setUp(self) -> None:
+        self.script = (ROOT / "scripts/test.sh").read_text(encoding="utf-8")
+
+    def test_the_isolation_assertion_is_still_conditional(self) -> None:
+        # The premise. If this assertion became unconditional the closing line
+        # could go back to being a constant, and this class would be wrong.
+        self.assertIn(
+            'assert sys.argv[2] != "gvisor" or "gVisor" in data["stdout"]',
+            self.script,
+        )
+
+    def test_the_closing_line_is_not_a_constant_claim(self) -> None:
+        closing = [
+            line for line in self.script.splitlines()
+            if line.startswith("echo \"Sandbox E2E passed:")
+        ]
+        self.assertEqual(len(closing), 1, closing)
+        self.assertNotIn("gVisor", closing[0], closing[0])
+        self.assertIn("${isolation_result}", closing[0], closing[0])
+
+    def verdict_branch(self) -> str:
+        """The branch lifted out of scripts/test.sh, not a copy of it.
+
+        A restated snippet would keep passing against the old wording after the
+        script changed - the assertion would be pinned to the test's own copy
+        rather than to the code that ships.
+        """
+        start = self.script.index('if [ "$SANDBOX_RUNTIME_CLASS" = gvisor ]; then')
+        end = self.script.index('\n', self.script.index('echo "Sandbox E2E passed:'))
+        return self.script[start:end]
+
+    def test_the_verdict_follows_the_configured_class(self) -> None:
+        branch = self.verdict_branch()
+        for configured, expected in (
+            ("gvisor", "+ gVisor"),
+            ("", "isolation not asserted"),
+            ("kata-clh", "runtimeClass=kata-clh, isolation not asserted"),
+        ):
+            with self.subTest(runtime_class=configured):
+                result = subprocess.run(
+                    ["bash", "-c", branch],
+                    env={**os.environ, "SANDBOX_RUNTIME_CLASS": configured},
+                    check=True, capture_output=True, text=True,
+                )
+                self.assertIn(expected, result.stdout)
+
+
+
 class DevelopmentScriptTests(unittest.TestCase):
     def test_shell_entrypoints_parse(self) -> None:
         for relative in (
