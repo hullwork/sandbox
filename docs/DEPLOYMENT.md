@@ -56,6 +56,40 @@ replace these values. Release `package-metadata.json` follows the shared schema
 and carries the OCI Chart digest plus all four runtime-image digests and their
 Helm value paths.
 
+### Embedded or external PostgreSQL
+
+`postgresql.embedded.enabled` decides whether the release carries its own
+database. The default is the single-instance StatefulSet, Service and ingress
+NetworkPolicy this chart ships; setting it to `false` drops all three and points
+the Control Plane at a server you operate:
+
+```yaml
+postgresql:
+  embedded:
+    enabled: false
+  external:
+    host: postgres.example.net
+    port: 5432
+```
+
+| Values path | Rendered variable | Read by |
+| --- | --- | --- |
+| `postgresql.embedded.enabled` | `SANDBOX_DB_HOST` (the in-cluster Service, or `external.host`) | `control_plane/core.py` |
+| `postgresql.external.port` | `SANDBOX_DB_PORT` | the same reader |
+
+The credential contract does not change with the mode: `postgresql.authSecret`
+is mounted either way and supplies `database`, `username` and `password`, so an
+external server only needs a Secret carrying its own values. The database and
+role must already exist there - the bundled StatefulSet is what creates the two
+it is handed. An empty `postgresql.external.host` fails `helm template` instead
+of falling back to the in-cluster Service name, because the Control Plane's own
+default is `sandbox-postgres`: the release would start, report ready, and answer
+every request from a Service the same render declined to create.
+
+The Kustomize base keeps its embedded server and the example
+`overlays/external-deps/control-plane-external.yaml` remains the source-deployment
+path for an out-of-cluster database.
+
 ## Local integration
 
 Lima provides the Linux VM in the standalone integration environment; kubeadm
