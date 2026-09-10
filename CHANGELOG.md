@@ -35,6 +35,19 @@ Versioning after its first public release.
   and once more on the bytes about to reach PyPI.
 - `twine check --strict` runs on the wheel and sdist before a tag is spent, because PyPI
   rejects an unrenderable long description only after the version number is consumed.
+- The Helm chart can point the Control Plane at a PostgreSQL you operate instead
+  of the StatefulSet it ships. `postgresql.embedded.enabled: false` already
+  dropped that StatefulSet, its Service and its ingress NetworkPolicy, but the
+  Control Plane kept a hardcoded in-cluster host and no port of its own, so the
+  release dialled a Service the same render had declined to create.
+  `postgresql.external.host` and `postgresql.external.port` now supply
+  `SANDBOX_DB_HOST` and `SANDBOX_DB_PORT`; the credential contract is unchanged
+  - `postgresql.authSecret` is mounted in either mode - so an external server
+  only needs a Secret carrying its own `database`, `username` and `password`,
+  and the database and role must already exist there. An empty
+  `postgresql.external.host` fails `helm template` rather than falling back to
+  `sandbox-postgres`, which is the process default and would have produced a
+  release that starts, reports ready, and answers from a Service that is gone.
 
 ### Changed
 

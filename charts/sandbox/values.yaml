@@ -54,6 +54,17 @@ workspace:
 postgresql:
   embedded:
     enabled: true
+  # Read only when embedded.enabled is false: the Control Plane dials this
+  # server instead of the Service the chart creates for it. The credential
+  # contract does not change with the mode - `authSecret` is mounted either way,
+  # so an external server needs a Secret carrying its own `database`,
+  # `username` and `password`, and the database and role must already exist
+  # there. The chart never carries credentials in values.
+  external:
+    # Required when embedded.enabled is false. The render fails on an empty
+    # value rather than falling back to the in-cluster Service name.
+    host: ""
+    port: 5432
   authSecret: sandbox-postgres-auth
   storageClass: ""
   storageSize: 4Gi

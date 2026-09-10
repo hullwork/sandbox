@@ -153,6 +153,66 @@ class HelmPackageContractTests(unittest.TestCase):
         self.assertEqual(rendered.count(f"name: {secret}"), 5)
         self.assertIn(f"secretName: {secret}", rendered)
 
+    def test_external_postgres_replaces_the_embedded_database(self) -> None:
+        """Switching off the embedded server must move the address too.
+
+        The chart already omitted the Service and the StatefulSet, but the
+        Control Plane kept a hardcoded in-cluster host and no port of its own:
+        a release built for an external server dialled a Service the same
+        render had declined to create.
+        """
+        if not shutil.which("helm"):
+            self.skipTest("helm is not installed")
+        host = "postgres.example.net"
+        rendered = subprocess.run(
+            [
+                "helm", "template", "sandbox", str(CHART),
+                "--set", "postgresql.embedded.enabled=false",
+                "--set-string", f"postgresql.external.host={host}",
+                "--set", "postgresql.external.port=6432",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        documents = [item for item in yaml.safe_load_all(rendered) if item]
+        named = {(item.get("kind"), item["metadata"]["name"]) for item in documents}
+        for absent in ("Service", "StatefulSet", "NetworkPolicy"):
+            self.assertNotIn((absent, "sandbox-postgres"), named)
+        control_plane = next(
+            item for item in documents
+            if item.get("kind") == "Deployment"
+            and item["metadata"]["name"] == "sandbox-control-plane"
+        )
+        environment = {
+            item["name"]: item.get("value")
+            for item in control_plane["spec"]["template"]["spec"]["containers"][0]["env"]
+        }
+        self.assertEqual(host, environment["SANDBOX_DB_HOST"])
+        # A string, not an integer: the API server refuses a non-string env value.
+        self.assertEqual("6432", environment["SANDBOX_DB_PORT"])
+
+    def test_external_postgres_without_a_host_is_refused_at_render(self) -> None:
+        """The Control Plane's own default is the reason this cannot be silent.
+
+        `SANDBOX_DB_HOST` falls back to `sandbox-postgres` in the process, so an
+        empty external host would ship a release that starts, reports ready, and
+        answers every request from a Service that does not exist.
+        """
+        if not shutil.which("helm"):
+            self.skipTest("helm is not installed")
+        result = subprocess.run(
+            [
+                "helm", "template", "sandbox", str(CHART),
+                "--set", "postgresql.embedded.enabled=false",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("postgresql.external.host", result.stderr)
+
     def test_otlp_endpoint_is_opt_in_and_reaches_both_traced_roles(self) -> None:
         if not shutil.which("helm"):
             self.skipTest("helm is not installed")
