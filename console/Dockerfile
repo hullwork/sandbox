@@ -5,7 +5,7 @@ RUN npm ci --ignore-scripts
 COPY . .
 RUN npm run build
 
-FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:d9083fe47768377ef55dedafd67d4da7c2f2bc2bece7554954f29359deb0dce9
+FROM nginxinc/nginx-unprivileged:1.31-alpine3.24@sha256:aa8c9087d36d93e9d650c5365f883b421e8214aedbad24ade52b844c583358f1
 # Temporary, until the base image is rebuilt: this digest ships libexpat
 # 2.8.3-r0 (CVE-2026-66046, CVE-2026-76641) and libuuid 2.42.1-r0
 # (CVE-2026-53612/53613/53614, CVE-2026-76642, CVE-2026-78408/78409/78410)
