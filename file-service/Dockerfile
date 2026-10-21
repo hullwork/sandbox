@@ -1,6 +1,6 @@
 # The build context is the repository root, not file-service/, because
 # safe_stdout.py lives in the repository's sandbox_platform package.
-FROM python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
+FROM python:3.15-alpine@sha256:2699b90f4d562a22e2dd076c82f964032f64814204bff36d271a54ba4cc2c7e2
 
 #tini: When there is no init, python is PID 1, and the kernel directly responds to the SIG_DFL signal of PID 1
 #Ignore - all SIGTERMs fail, each Pod must wait for the entire terminationGracePeriodSeconds
